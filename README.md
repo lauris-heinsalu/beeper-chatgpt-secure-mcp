@@ -57,6 +57,31 @@ On **7 October 2026**, the isolated Events path was verified against ChatGPT's n
 
 A separate ordinary-Chat experiment confirmed that Chat can use the sidecar's normal `events_status` MCP tool, but the native event-source discovery/subscription controls exposed in Cloud Work were not available in that Chat surface. That is recorded as an observed product-surface limitation, not a claim that the underlying Chat runtime could never support Events.
 
+## Live reliability pass
+
+A live restart/failure-boundary pass on **7 October 2026** also passed:
+
+- restarting the sidecar preserved the active subscription and durable state;
+- a test-bot message that arrived while the sidecar was stopped was recovered by
+  reconciliation after restart;
+- the first overlapping recovery scan inserted one event and the immediate
+  repeat scan inserted zero, demonstrating live idempotency on the same source
+  window;
+- the recovered event had one delivery and received HTTP 200 on its first
+  delivery attempt;
+- a full VM reboot brought Beeper Server, the stable tunnel, the sidecar, and
+  the Events tunnel back automatically; both tunnel readiness endpoints returned
+  HTTP 200;
+- a transient sidecar-to-Beeper connection error during boot self-healed through
+  the reconnect/reconciliation loop;
+- deliberately stopping the Events tunnel did **not** break the stable native
+  Beeper MCP app; and
+- the final sidecar state was source-connected with one active test subscription,
+  zero pending deliveries, zero dead-letter deliveries, and no source error.
+
+See [EVENTS-SIDECAR.md](EVENTS-SIDECAR.md#live-reliability-pass) for details and
+the remaining ChatGPT product-surface/notification limitations.
+
 ## What was verified
 
 Inspection date: **7 October 2026**.

@@ -284,22 +284,39 @@ The tests cover, among other things:
 - callback verification; and
 - dual signatures during secret rotation.
 
-## Remaining public-demo reliability pass
+## Live reliability pass
 
-Before calling the demo publication-ready, exercise the important restart and
-failure boundaries against the **live deployment**, not only unit tests:
+The live deployment reliability pass was completed on **7 October 2026**.
 
-1. restart the sidecar and verify the active subscription and durable state survive;
-2. force a Beeper WebSocket disconnect/reconnect, create an inbound message during
-   the gap, and verify reconciliation discovers it once at the logical level;
-3. reboot the VM and verify the native Beeper MCP service, sidecar, and both
-   tunnel paths recover without manual intervention;
-4. deliberately stop the sidecar or Events tunnel and confirm the stable native
-   Beeper MCP path remains healthy;
-5. after each test, confirm there are no unexpected pending/dead-letter
-   deliveries or source errors.
+| Test | Result |
+|---|---|
+| Sidecar restart | Passed. The service and Events tunnel returned active, the persisted subscription remained active, and the source reconnected with no pending or dead-letter delivery. |
+| Message received while sidecar was stopped | Passed. The stable native Beeper MCP remained usable, a test-bot reply arrived while the sidecar was offline, and startup reconciliation recovered it. |
+| Reconciliation idempotency | Passed. The first post-gap scan reported one inserted source event; the immediate overlapping scan reported zero additional inserts. The recovered source event had one delivery row. |
+| Recovered event delivery | Passed. The recovered event was delivered once with HTTP 200 on the first delivery attempt; pending and dead-letter counts returned to zero. |
+| Full VM reboot | Passed. All four user services were active and enabled after reboot: Beeper Server, the stable MCP tunnel, the Events sidecar, and the Events tunnel. Both tunnel readiness endpoints returned HTTP 200 without manual intervention. |
+| Startup race recovery | Passed. The sidecar briefly observed Beeper's loopback listener as unavailable during boot, then its reconnect/reconciliation loop self-healed once Beeper was ready; the final source error was null. |
+| Events-tunnel failure isolation | Passed. With the Events tunnel deliberately stopped, the existing native Beeper MCP app still completed a live read call. Restarting the Events tunnel restored the sidecar MCP surface. |
+| Final sidecar state | Healthy: source connected, one active test subscription, zero pending deliveries, zero dead-letter deliveries, and no source error. |
 
-The supported Cloud Work end-to-end Events test is already complete. Ordinary
-Chat was also checked as a curiosity: it can call the sidecar's normal MCP tool,
-but its native Events subscription controls were not exposed in the tested Chat
-surface.
+The stronger process-downtime gap test covers the important WebSocket-loss
+property: an inbound message can arrive while the realtime listener is absent,
+then be discovered through the deliberately overlapping reconciliation path.
+The reboot also exercised automatic WebSocket reconnection after both services
+came back.
+
+No human recipient was used for the gap-recovery message test; it used a bot
+test conversation. Exact event, message, chat, sender, subscription, tunnel,
+host, and credential identifiers are intentionally omitted from publication.
+
+The remaining known limitations are product-surface/UX questions rather than
+failed transport tests:
+
+- ordinary Chat can call the sidecar's normal MCP tool but did not expose native
+  Events subscription controls in the tested surface;
+- the Cloud Work automation did not produce a clearly visible user notification
+  in the original test even though the native event was delivered and the
+  automation path was triggered.
+
+Neither limitation changes the isolation property: failure of the Events path
+does not remove the stable native Beeper MCP tool path.
