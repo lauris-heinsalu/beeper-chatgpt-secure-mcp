@@ -115,3 +115,50 @@ def test_discover_advertises_only_events_and_status_tool(tmp_path):
 
     tools = api._tools_list()["tools"]
     assert [tool["name"] for tool in tools] == ["events_status"]
+
+
+@pytest.mark.asyncio
+async def test_mcp_endpoint_requires_bearer(tmp_path):
+    from aiohttp.test_utils import TestClient, TestServer
+
+    settings = _settings(tmp_path)
+    settings.mcp_bearer_file.write_text(
+        "Bearer test-secret", encoding="utf-8"
+    )
+    db = Database(settings.db_path)
+    db.initialize()
+    api = McpApi(
+        settings=settings,
+        db=db,
+        service=FakeService(),
+        webhook_sender=FakeSender(),
+    )
+
+    client = TestClient(TestServer(api.application()))
+    await client.start_server()
+    try:
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "server/discover",
+            "params": {
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    "io.modelcontextprotocol/clientCapabilities": {},
+                }
+            },
+        }
+
+        unauthorized = await client.post("/mcp", json=payload)
+        assert unauthorized.status == 401
+
+        authorized = await client.post(
+            "/mcp",
+            json=payload,
+            headers={"Authorization": "Bearer test-secret"},
+        )
+        assert authorized.status == 200
+        body = await authorized.json()
+        assert body["result"]["supportedVersions"] == ["2026-07-28"]
+    finally:
+        await client.close()

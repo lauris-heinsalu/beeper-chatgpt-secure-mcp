@@ -36,8 +36,9 @@ Inspection date: **6 October 2026**.
 |---|---|
 | VM | Ubuntu 24.04.5 LTS, Linux ARM64 |
 | Beeper CLI | `0.6.2` |
-| Installed Beeper Server build | `nightly-4.3.178-1791273065056` |
+| Installed Beeper Server build | `nightly-4.3.181-1791315107868` (upgraded from 4.3.178 during the Events feasibility check) |
 | MCP-reported server identity | `beeper_desktop_api_api`, protocol-reported server version `4.2.2` |
+| Fresh MCP negotiation after the 4.3.181 upgrade | Still `2025-06-18`; native OpenAI MCP Events support was not exposed |
 | OpenAI tunnel client | `0.0.15`, commit `a390c168ff1b2d14e73a95991c186c6aba3ff5a0` |
 | Beeper listener | Loopback only, port `23374` |
 | Native MCP route | `/v0/mcp` |

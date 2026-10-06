@@ -1,0 +1,14 @@
+[Unit]
+Description=OpenAI Secure MCP Tunnel - Beeper Events
+After=network-online.target beeper-events-sidecar.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/tunnel-client run --profile beeper-events --health.url-file %h/.config/openai-tunnel/events-health-url --log.file %h/.config/openai-tunnel/events-tunnel.log
+Restart=always
+RestartSec=5
+UMask=0077
+
+[Install]
+WantedBy=default.target
