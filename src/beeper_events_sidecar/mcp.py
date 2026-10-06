@@ -14,6 +14,7 @@ from .models import (
     Subscription,
     canonical_json,
     isoformat_z,
+    parse_timestamp,
     stable_id,
     utc_now,
 )
@@ -207,20 +208,6 @@ class McpApi:
                 "tools": {},
                 "events": {},
             },
-            "_meta": {
-                "io.modelcontextprotocol/serverInfo": {
-                    "name": "beeper-events-sidecar",
-                    "version": "0.1.0",
-                }
-            },
-            "instructions": (
-                "This isolated sidecar only advertises durable incoming "
-                "Beeper message events and operational status. Use the "
-                "separate native Beeper MCP app to read conversation "
-                "content or send messages."
-            ),
-            "ttlMs": 300_000,
-            "cacheScope": "private",
         }
 
     @staticmethod
@@ -306,6 +293,12 @@ class McpApi:
         if name != _EVENT_NAME:
             raise RpcError(-32602, f"Unsupported event: {name!r}")
         self._validate_arguments(arguments)
+        if params.get("cursor") is not None:
+            raise RpcError(
+                -32602,
+                "message.created does not support protocol replay; "
+                "cursor must be null",
+            )
 
         if not isinstance(delivery, dict):
             raise RpcError(-32602, "delivery must be an object")
@@ -336,6 +329,14 @@ class McpApi:
 
         now = utc_now()
         now_text = isoformat_z(now)
+        existing_is_live = (
+            existing is not None
+            and existing.active
+            and (
+                existing.expires_at is None
+                or parse_timestamp(existing.expires_at) > now
+            )
+        )
         if not self.db.callback_verification_valid(
             _PRINCIPAL,
             callback_url,
@@ -368,9 +369,12 @@ class McpApi:
                 ),
             )
 
+        if existing is not None and not existing_is_live:
+            self.db.deactivate_subscription(existing.id, now_text)
+
         previous_secret: str | None = None
         previous_secret_expires_at: str | None = None
-        if existing is not None:
+        if existing_is_live and existing is not None:
             if existing.secret != secret:
                 previous_secret = existing.secret
                 previous_secret_expires_at = isoformat_z(
@@ -414,7 +418,9 @@ class McpApi:
             )
 
         created_at = (
-            existing.created_at if existing is not None else now_text
+            existing.created_at
+            if existing_is_live and existing is not None
+            else now_text
         )
         subscription = Subscription(
             id=identity,
@@ -452,6 +458,10 @@ class McpApi:
 
         if not isinstance(delivery, dict):
             raise RpcError(-32602, "delivery must be an object")
+        if delivery.get("mode") != "webhook":
+            raise RpcError(
+                -32602, "Only webhook event delivery is supported"
+            )
         callback_url = delivery.get("url")
         if not isinstance(callback_url, str) or not callback_url:
             raise RpcError(-32602, "delivery.url is required")

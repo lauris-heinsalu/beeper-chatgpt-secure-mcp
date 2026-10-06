@@ -64,7 +64,10 @@ MCP tools.
 ### Recovery path
 
 The WebSocket is treated as a low-latency signal, not as the sole source of
-truth.
+truth. This is not merely defensive guesswork: the generated `/v1/spec` from
+the tested Beeper Server 4.3.181 explicitly describes WebSocket delivery as
+at-most-once, with no replay after reconnect, and tells clients to refetch via
+HTTP after a disconnect to reconcile drift.
 
 A durable checkpoint records the upper bound of the last complete Beeper
 message-history reconciliation. On startup, after a WebSocket reconnect, and
@@ -149,6 +152,7 @@ python -m venv .venv
 python -m pip install -e '.[dev]'
 pytest -q
 ruff check src tests
+mypy --ignore-missing-imports src
 ```
 
 The current implementation exposes only one harmless MCP tool,

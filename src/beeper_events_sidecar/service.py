@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import random
+import secrets
 from datetime import timedelta
 from typing import Any
 
@@ -165,7 +165,7 @@ class EventService:
 
         for message_id in message_ids:
             message = by_id.get(message_id)
-            if message is None:
+            if not self._ws_message_complete(message):
                 try:
                     message = await self.beeper.message(
                         chat_id, message_id
@@ -177,6 +177,10 @@ class EventService:
                     )
                     self.request_reconcile()
                     continue
+
+            if message is None:
+                self.request_reconcile()
+                continue
 
             normalized = await self._normalize_message(
                 message,
@@ -195,15 +199,39 @@ class EventService:
                     normalized.source_event_id,
                 )
 
+    @staticmethod
+    def _ws_message_complete(
+        message: dict[str, Any] | None,
+    ) -> bool:
+        if not isinstance(message, dict):
+            return False
+        required = (
+            message.get("id") or message.get("messageID"),
+            message.get("accountID"),
+            message.get("chatID"),
+            message.get("timestamp"),
+        )
+        return (
+            all(isinstance(value, str) and value for value in required)
+            and isinstance(message.get("isSender"), bool)
+        )
+
     async def _normalize_message(
         self,
         message: dict[str, Any],
         *,
         discovered_via: str,
     ) -> SourceEvent | None:
-        if message.get("isSender") is True:
+        is_sender = message.get("isSender")
+        if is_sender is True:
             return None
-        if message.get("isDeleted") is True:
+        if discovered_via == "websocket" and is_sender is not False:
+            # Never risk turning an outgoing message into a self-wake loop.
+            # The HTTP reconciliation path is explicitly filtered to
+            # sender=others and can safely recover an incoming message.
+            self.request_reconcile()
+            return None
+        if message.get("isDeleted") is True or message.get("isHidden") is True:
             return None
 
         message_id = message.get("id") or message.get("messageID")
@@ -211,9 +239,15 @@ class EventService:
         chat_id = message.get("chatID")
         timestamp = message.get("timestamp")
 
-        if not all(
-            isinstance(value, str) and value
-            for value in (message_id, account_id, chat_id, timestamp)
+        if (
+            not isinstance(message_id, str)
+            or not message_id
+            or not isinstance(account_id, str)
+            or not account_id
+            or not isinstance(chat_id, str)
+            or not chat_id
+            or not isinstance(timestamp, str)
+            or not timestamp
         ):
             logger.warning(
                 "Skipping message with incomplete identity fields"
@@ -432,11 +466,12 @@ class EventService:
             return
 
         base = min(
-            2 ** max(delivery.attempt_count, 0),
+            self.settings.delivery_base_backoff_seconds
+            * (2 ** max(delivery.attempt_count, 0)),
             self.settings.delivery_max_backoff_seconds,
         )
         backoff = min(
-            base * random.uniform(1.0, 1.2),
+            base * secrets.SystemRandom().uniform(1.0, 1.2),
             self.settings.delivery_max_backoff_seconds,
         )
         next_attempt = utc_now() + timedelta(seconds=backoff)

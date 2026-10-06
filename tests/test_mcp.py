@@ -33,6 +33,7 @@ def _settings(tmp_path: Path) -> Settings:
         reconcile_overlap_seconds=3600,
         reconnect_max_seconds=30,
         delivery_max_attempts=8,
+        delivery_base_backoff_seconds=1,
         delivery_max_backoff_seconds=300,
         default_subscription_ttl_seconds=604800,
         secret_rotation_seconds=300,
@@ -162,3 +163,81 @@ async def test_mcp_endpoint_requires_bearer(tmp_path):
         assert body["result"]["supportedVersions"] == ["2026-07-28"]
     finally:
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_unsubscribe_cancels_pending_and_resubscribe_starts_fresh(
+    tmp_path,
+):
+    from datetime import timedelta
+
+    from beeper_events_sidecar.models import SourceEvent, isoformat_z, utc_now
+
+    settings = _settings(tmp_path)
+    db = Database(settings.db_path)
+    db.initialize()
+    sender = FakeSender()
+    api = McpApi(
+        settings=settings,
+        db=db,
+        service=FakeService(),
+        webhook_sender=sender,
+    )
+
+    params = {
+        "name": "message.created",
+        "arguments": {},
+        "delivery": {
+            "mode": "webhook",
+            "url": "https://example.com/callback",
+            "secret": _secret(b"a"),
+        },
+        "cursor": None,
+    }
+    subscribed = await api._events_subscribe(params)
+    first_subscription = db.get_subscription(subscribed["id"])
+    assert first_subscription is not None
+
+    event_time = utc_now() + timedelta(seconds=1)
+    event = SourceEvent(
+        source_key="beeper:a:c:m-old",
+        source_event_id="src_old",
+        name="message.created",
+        occurred_at=isoformat_z(event_time),
+        account_id="a",
+        chat_id="c",
+        local_chat_id=None,
+        network="WhatsApp",
+        message_id="m-old",
+        sender_id="sender",
+        sender_name="Alice",
+        discovered_via="test",
+    )
+    assert db.record_event_and_enqueue(
+        event,
+        now=isoformat_z(event_time + timedelta(seconds=1)),
+    )
+    assert db.stats(isoformat_z(event_time))["pending_deliveries"] == 1
+
+    api._events_unsubscribe(
+        {
+            "name": "message.created",
+            "arguments": {},
+            "delivery": {
+                "mode": "webhook",
+                "url": "https://example.com/callback",
+            },
+        }
+    )
+    assert db.stats(isoformat_z(event_time))["pending_deliveries"] == 0
+
+    await api._events_subscribe(params)
+    second_subscription = db.get_subscription(subscribed["id"])
+    assert second_subscription is not None
+    assert second_subscription.active
+    assert (
+        second_subscription.created_at
+        != first_subscription.created_at
+    )
+    # Cancelled work from the old subscription lifecycle never reappears.
+    assert db.stats(isoformat_z(utc_now()))["pending_deliveries"] == 0

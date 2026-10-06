@@ -108,7 +108,9 @@ class BeeperClient:
                 "dateAfter": date_after,
                 "dateBefore": date_before,
                 "sender": "others",
-                "limit": "200",
+                "excludeLowPriority": "false",
+                "includeMuted": "true",
+                "limit": "20",
             }
             if cursor:
                 params["cursor"] = cursor
@@ -205,9 +207,13 @@ class BeeperClient:
                 }
             )
             updated = await self._receive_json(ws, timeout=10)
+            response_request_id = updated.get("requestID")
             if (
                 updated.get("type") != "subscriptions.updated"
-                or updated.get("requestID") != request_id
+                or (
+                    response_request_id is not None
+                    and response_request_id != request_id
+                )
             ):
                 raise BeeperError(
                     "Beeper WebSocket did not confirm subscriptions.set"

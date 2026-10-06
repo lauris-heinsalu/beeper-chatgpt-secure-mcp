@@ -14,7 +14,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import aiohttp
-from aiohttp.abc import AbstractResolver
+from aiohttp.abc import AbstractResolver, ResolveResult
 from standardwebhooks.webhooks import Webhook
 
 from .models import parse_timestamp, utc_now
@@ -63,7 +63,7 @@ class PinnedResolver(AbstractResolver):
         host: str,
         port: int = 0,
         family: socket.AddressFamily = socket.AF_INET,
-    ) -> list[dict[str, Any]]:
+    ) -> list[ResolveResult]:
         if host != self.hostname:
             raise OSError("Unexpected hostname for pinned callback resolver")
         return [

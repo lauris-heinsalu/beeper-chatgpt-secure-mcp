@@ -14,11 +14,15 @@ from beeper_events_sidecar.service import EventService
 
 
 class FakeBeeper:
-    def __init__(self, messages):
+    def __init__(self, messages, hydrated=None):
         self.messages = messages
+        self.hydrated = hydrated or {}
 
     async def search_messages(self, *, date_after, date_before):
         return list(self.messages)
+
+    async def message(self, chat_id, message_id):
+        return self.hydrated[(chat_id, message_id)]
 
     async def chat_metadata(self, chat_id):
         return {
@@ -44,6 +48,7 @@ def _settings(tmp_path: Path) -> Settings:
         reconcile_overlap_seconds=3600,
         reconnect_max_seconds=30,
         delivery_max_attempts=8,
+        delivery_base_backoff_seconds=1,
         delivery_max_backoff_seconds=300,
         default_subscription_ttl_seconds=604800,
         secret_rotation_seconds=300,
@@ -133,3 +138,195 @@ async def test_self_message_is_not_normalized(tmp_path):
         )
         is None
     )
+
+
+class StatusSender:
+    def __init__(self, status: int):
+        self.status = status
+        self.event_ids = []
+
+    async def send_event(self, **kwargs):
+        self.event_ids.append(kwargs["event"]["eventId"])
+        return self.status
+
+
+def _delivery_fixture(tmp_path, sender):
+    import base64
+
+    from beeper_events_sidecar.models import SourceEvent, Subscription
+
+    settings = _settings(tmp_path)
+    db = Database(settings.db_path)
+    db.initialize()
+    now = utc_now()
+    now_text = isoformat_z(now)
+    secret = "whsec_" + base64.b64encode(b"x" * 32).decode()
+    subscription = Subscription(
+        id="sub-delivery",
+        principal="test",
+        name="message.created",
+        arguments={},
+        callback_url="https://example.com/callback",
+        secret=secret,
+        previous_secret=None,
+        previous_secret_expires_at=None,
+        expires_at=None,
+        active=True,
+        created_at=isoformat_z(now - timedelta(minutes=1)),
+    )
+    db.upsert_subscription(subscription, now=now_text)
+    event = SourceEvent(
+        source_key="beeper:whatsapp:chat:message",
+        source_event_id="src-delivery",
+        name="message.created",
+        occurred_at=now_text,
+        account_id="whatsapp",
+        chat_id="chat",
+        local_chat_id=None,
+        network="WhatsApp",
+        message_id="message",
+        sender_id="sender",
+        sender_name="Alice",
+        discovered_via="test",
+    )
+    assert db.record_event_and_enqueue(event, now=now_text)
+    delivery = db.get_due_deliveries(now_text)[0]
+    service = EventService(
+        settings=settings,
+        db=db,
+        beeper=FakeBeeper([]),
+        webhook_sender=sender,
+    )
+    return db, service, delivery, now_text
+
+
+@pytest.mark.asyncio
+async def test_transient_delivery_failure_retries_same_event_id(tmp_path):
+    sender = StatusSender(500)
+    db, service, delivery, now_text = _delivery_fixture(
+        tmp_path, sender
+    )
+
+    await service._deliver(delivery)
+
+    stats = db.stats(now_text)
+    assert stats["pending_deliveries"] == 1
+    assert stats["dead_letter_deliveries"] == 0
+    assert sender.event_ids == [delivery.event_id]
+
+
+@pytest.mark.asyncio
+async def test_http_410_goes_directly_to_dead_letter(tmp_path):
+    sender = StatusSender(410)
+    db, service, delivery, now_text = _delivery_fixture(
+        tmp_path, sender
+    )
+
+    await service._deliver(delivery)
+
+    stats = db.stats(now_text)
+    assert stats["pending_deliveries"] == 0
+    assert stats["dead_letter_deliveries"] == 1
+    assert sender.event_ids == [delivery.event_id]
+
+
+@pytest.mark.asyncio
+async def test_websocket_partial_entry_is_hydrated_before_delivery(tmp_path):
+    import base64
+
+    settings = _settings(tmp_path)
+    db = Database(settings.db_path)
+    db.initialize()
+    now = utc_now()
+    now_text = isoformat_z(now)
+
+    subscription = Subscription(
+        id="sub-ws",
+        principal="test",
+        name="message.created",
+        arguments={},
+        callback_url="https://example.com/callback",
+        secret="whsec_" + base64.b64encode(b"x" * 32).decode(),
+        previous_secret=None,
+        previous_secret_expires_at=None,
+        expires_at=None,
+        active=True,
+        created_at=isoformat_z(now - timedelta(minutes=1)),
+    )
+    db.upsert_subscription(subscription, now=now_text)
+
+    hydrated = {
+        "id": "m-ws",
+        "accountID": "whatsapp",
+        "chatID": "chat-ws",
+        "senderID": "sender-a",
+        "senderName": "Alice",
+        "timestamp": now_text,
+        "isSender": False,
+        "isDeleted": False,
+    }
+    beeper = FakeBeeper(
+        [],
+        hydrated={("chat-ws", "m-ws"): hydrated},
+    )
+    service = EventService(
+        settings=settings,
+        db=db,
+        beeper=beeper,
+        webhook_sender=UnusedSender(),
+    )
+
+    await service._ingest_ws_event(
+        {
+            "type": "message.upserted",
+            "seq": 1,
+            "ts": now_text,
+            "chatID": "chat-ws",
+            "ids": ["m-ws"],
+            "entries": [{"id": "m-ws"}],
+        }
+    )
+
+    stats = db.stats(isoformat_z(utc_now()))
+    assert stats["source_events_seen"] == 1
+    assert stats["pending_deliveries"] == 1
+
+
+@pytest.mark.asyncio
+async def test_websocket_unknown_sender_direction_defers_to_reconcile(
+    tmp_path,
+):
+    settings = _settings(tmp_path)
+    db = Database(settings.db_path)
+    db.initialize()
+    now_text = isoformat_z(utc_now())
+    hydrated = {
+        "id": "m-unknown",
+        "accountID": "whatsapp",
+        "chatID": "chat-ws",
+        "senderID": "sender-a",
+        "timestamp": now_text,
+        # Deliberately no isSender.
+    }
+    service = EventService(
+        settings=settings,
+        db=db,
+        beeper=FakeBeeper(
+            [],
+            hydrated={("chat-ws", "m-unknown"): hydrated},
+        ),
+        webhook_sender=UnusedSender(),
+    )
+
+    await service._ingest_ws_event(
+        {
+            "type": "message.upserted",
+            "seq": 1,
+            "ts": now_text,
+            "chatID": "chat-ws",
+            "ids": ["m-unknown"],
+        }
+    )
+
+    assert db.stats(now_text)["source_events_seen"] == 0
+    assert service._reconcile_requested.is_set()

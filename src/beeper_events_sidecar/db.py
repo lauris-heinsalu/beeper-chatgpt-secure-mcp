@@ -93,6 +93,10 @@ class Database:
             pass
         with self._connect() as conn:
             conn.executescript(_SCHEMA)
+        try:
+            os.chmod(self.path, 0o600)
+        except OSError:
+            pass
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path, timeout=5.0)
@@ -171,11 +175,6 @@ class Database:
         now: str,
     ) -> None:
         with self._connect() as conn:
-            existing = conn.execute(
-                "SELECT created_at FROM subscriptions WHERE id = ?",
-                (subscription.id,),
-            ).fetchone()
-            created_at = now if existing is None else existing["created_at"]
             conn.execute(
                 """
                 INSERT INTO subscriptions(
@@ -195,6 +194,7 @@ class Database:
                         excluded.previous_secret_expires_at,
                     expires_at = excluded.expires_at,
                     active = 1,
+                    created_at = excluded.created_at,
                     updated_at = excluded.updated_at
                 """,
                 (
@@ -207,7 +207,7 @@ class Database:
                     subscription.previous_secret,
                     subscription.previous_secret_expires_at,
                     subscription.expires_at,
-                    created_at,
+                    subscription.created_at,
                     now,
                 ),
             )
@@ -219,6 +219,17 @@ class Database:
                 UPDATE subscriptions
                 SET active = 0, updated_at = ?
                 WHERE id = ?
+                """,
+                (now, subscription_id),
+            )
+            conn.execute(
+                """
+                UPDATE deliveries
+                SET status = 'cancelled',
+                    last_attempt_at = ?,
+                    last_error = 'subscription inactive'
+                WHERE subscription_id = ?
+                  AND status = 'pending'
                 """,
                 (now, subscription_id),
             )

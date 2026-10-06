@@ -22,6 +22,7 @@ class Settings:
     reconcile_overlap_seconds: int
     reconnect_max_seconds: int
     delivery_max_attempts: int
+    delivery_base_backoff_seconds: int
     delivery_max_backoff_seconds: int
     default_subscription_ttl_seconds: int
     secret_rotation_seconds: int
@@ -83,10 +84,13 @@ class Settings:
                 "BEEPER_EVENTS_RECONNECT_MAX_SECONDS", 30
             ),
             delivery_max_attempts=_env_int(
-                "BEEPER_EVENTS_DELIVERY_MAX_ATTEMPTS", 8
+                "BEEPER_EVENTS_DELIVERY_MAX_ATTEMPTS", 12
+            ),
+            delivery_base_backoff_seconds=_env_int(
+                "BEEPER_EVENTS_DELIVERY_BASE_BACKOFF_SECONDS", 30
             ),
             delivery_max_backoff_seconds=_env_int(
-                "BEEPER_EVENTS_DELIVERY_MAX_BACKOFF_SECONDS", 300
+                "BEEPER_EVENTS_DELIVERY_MAX_BACKOFF_SECONDS", 21_600
             ),
             default_subscription_ttl_seconds=_env_int(
                 "BEEPER_EVENTS_DEFAULT_SUBSCRIPTION_TTL_SECONDS",
