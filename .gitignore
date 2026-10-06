@@ -22,3 +22,5 @@ __pycache__/
 *.sqlite3-shm
 
 *.egg-info/
+build/
+dist/

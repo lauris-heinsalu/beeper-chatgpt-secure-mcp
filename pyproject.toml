@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Isolated, durable OpenAI MCP Events sidecar for a private Beeper Server."
 readme = "README.md"
 requires-python = ">=3.12"
-license = { text = "MIT" }
+license = "MIT"
 authors = [{ name = "Lauris Heinsalu" }]
 dependencies = [
   "aiohttp>=3.10,<4",
