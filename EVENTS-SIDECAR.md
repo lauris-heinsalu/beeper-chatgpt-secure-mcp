@@ -212,6 +212,32 @@ Install and start
 The separate tunnel is intentional. It keeps the Events experiment from
 changing the already-working native Beeper MCP app.
 
+## Live validation so far
+
+The first VM deployment on 6 October 2026 has already exercised several failure
+boundaries rather than only unit-test mocks:
+
+- the sidecar bound only to loopback and connected to Beeper's live WebSocket;
+- self-contained `server/discover`, `events/list`, `tools/list`, and the
+  read-only `events_status` tool all returned HTTP 200 locally under MCP
+  `2026-07-28`;
+- a live Beeper validation error exposed that the message-search page limit is
+  20, not 200; after correcting it, reconciliation scanned seven incoming
+  messages from the outage window, persisted seven source events, and an
+  immediate overlapping reconciliation inserted zero duplicates;
+- the SQLite database and its WAL/SHM companions were owner-only, and the main
+  database file was verified as mode `0600`;
+- stopping the Events sidecar left the existing native Beeper MCP tunnel and
+  ChatGPT app usable; a live connected-account metadata call succeeded while
+  the sidecar was down;
+- restarting the sidecar re-established the WebSocket automatically and
+  reconciliation again inserted zero duplicates.
+
+The unsupported boundary is still the important one: the separate OpenAI Events
+tunnel/app, callback subscription, signed webhook delivery, and actual ChatGPT
+Work wakeup have not yet been exercised end to end. Do not call the Events path
+complete until those tests pass.
+
 ## Acceptance tests before calling it production-worthy
 
 At minimum:
