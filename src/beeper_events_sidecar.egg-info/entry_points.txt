@@ -1,2 +1,0 @@
-[console_scripts]
-beeper-events-sidecar = beeper_events_sidecar.main:main
