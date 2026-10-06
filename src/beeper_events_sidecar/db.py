@@ -14,7 +14,6 @@ from .models import (
     stable_id,
 )
 
-
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS subscriptions (
     id TEXT PRIMARY KEY,

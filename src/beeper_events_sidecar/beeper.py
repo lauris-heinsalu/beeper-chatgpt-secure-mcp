@@ -4,14 +4,12 @@ import asyncio
 import json
 import logging
 from collections.abc import AsyncIterator
-from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 import aiohttp
 
 from .config import Settings
-
 
 logger = logging.getLogger(__name__)
 

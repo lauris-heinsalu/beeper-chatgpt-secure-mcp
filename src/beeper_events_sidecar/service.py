@@ -20,7 +20,6 @@ from .models import (
 )
 from .webhooks import CallbackEndpointError, WebhookSender
 
-
 logger = logging.getLogger(__name__)
 _CHECKPOINT_NAME = "beeper_messages"
 
@@ -123,7 +122,7 @@ class EventService:
                 raise BeeperError("Beeper WebSocket ended")
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - daemon boundary
                 self.last_source_error = f"{type(exc).__name__}: {exc}"[:1000]
                 logger.warning(
                     "Beeper WebSocket source disconnected: %s",
@@ -403,7 +402,7 @@ class EventService:
                     error=error,
                 )
                 return
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - persist unexpected delivery failures
             error = f"{type(exc).__name__}: {exc}"
 
         attempts_after_this = delivery.attempt_count + 1

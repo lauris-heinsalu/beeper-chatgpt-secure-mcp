@@ -20,7 +20,6 @@ from .models import (
 from .service import EventService
 from .webhooks import CallbackEndpointError, WebhookSender, validate_webhook_secret
 
-
 logger = logging.getLogger(__name__)
 _PROTOCOL_VERSION = "2026-07-28"
 _PRINCIPAL = "private-secure-tunnel"

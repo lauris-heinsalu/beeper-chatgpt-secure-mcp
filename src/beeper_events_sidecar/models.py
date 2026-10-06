@@ -3,23 +3,21 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 
 def utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def isoformat_z(value: datetime) -> str:
-    value = value.astimezone(timezone.utc)
+    value = value.astimezone(UTC)
     return value.isoformat().replace("+00:00", "Z")
 
 
 def parse_timestamp(value: str) -> datetime:
-    return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(
-        timezone.utc
-    )
+    return datetime.fromisoformat(value).astimezone(UTC)
 
 
 def canonical_json(value: dict[str, Any]) -> str:
@@ -89,15 +87,18 @@ class Subscription:
             return False
 
         chat_ids = set(self.arguments.get("chat_ids") or [])
-        if chat_ids and event.chat_id not in chat_ids:
-            if not event.local_chat_id or event.local_chat_id not in chat_ids:
-                return False
-
-        sender_ids = set(self.arguments.get("sender_ids") or [])
-        if sender_ids and event.sender_id not in sender_ids:
+        if (
+            chat_ids
+            and event.chat_id not in chat_ids
+            and (
+                not event.local_chat_id
+                or event.local_chat_id not in chat_ids
+            )
+        ):
             return False
 
-        return True
+        sender_ids = set(self.arguments.get("sender_ids") or [])
+        return not sender_ids or event.sender_id in sender_ids
 
 
 @dataclass(frozen=True, slots=True)

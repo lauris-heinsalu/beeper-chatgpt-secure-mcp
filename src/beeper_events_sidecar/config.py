@@ -30,7 +30,7 @@ class Settings:
     log_level: str
 
     @classmethod
-    def from_env(cls) -> "Settings":
+    def from_env(cls) -> Settings:
         home = Path.home()
         state_dir = Path(
             os.getenv(

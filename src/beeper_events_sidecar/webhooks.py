@@ -9,7 +9,7 @@ import json
 import secrets
 import socket
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -17,7 +17,7 @@ import aiohttp
 from aiohttp.abc import AbstractResolver
 from standardwebhooks.webhooks import Webhook
 
-from .models import isoformat_z, parse_timestamp, utc_now
+from .models import parse_timestamp, utc_now
 
 
 class CallbackEndpointError(RuntimeError):
@@ -136,14 +136,7 @@ class CallbackHttpClient:
                     "Callback resolved to an invalid IP address",
                 ) from exc
 
-            if (
-                ip.is_private
-                or ip.is_loopback
-                or ip.is_link_local
-                or ip.is_multicast
-                or ip.is_reserved
-                or ip.is_unspecified
-            ):
+            if not ip.is_global:
                 raise CallbackEndpointError(
                     "private_address",
                     "Callback hostname resolved to a non-public address",
@@ -199,7 +192,7 @@ class CallbackHttpClient:
                             "Callback response exceeded 64 KiB",
                         )
                     return response.status, payload
-            except asyncio.TimeoutError as exc:
+            except TimeoutError as exc:
                 raise CallbackEndpointError(
                     "timeout", "Callback endpoint timed out"
                 ) from exc
@@ -312,10 +305,13 @@ class WebhookSender:
             )
 
         signing_secrets = [secret]
-        if previous_secret and previous_secret_expires_at:
-            if parse_timestamp(previous_secret_expires_at) > utc_now():
-                validate_webhook_secret(previous_secret)
-                signing_secrets.append(previous_secret)
+        if (
+            previous_secret
+            and previous_secret_expires_at
+            and parse_timestamp(previous_secret_expires_at) > utc_now()
+        ):
+            validate_webhook_secret(previous_secret)
+            signing_secrets.append(previous_secret)
 
         event_id = str(event["eventId"])
         signed_at = utc_now()

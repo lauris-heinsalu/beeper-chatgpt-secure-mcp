@@ -4,7 +4,7 @@ import asyncio
 import json
 import logging
 import signal
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import aiohttp
 from aiohttp import web
@@ -20,7 +20,7 @@ from .webhooks import CallbackHttpClient, WebhookSender
 class JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         payload: dict[str, object] = {
-            "time": datetime.now(timezone.utc).isoformat(),
+            "time": datetime.now(UTC).isoformat(),
             "level": record.levelname,
             "logger": record.name,
             "message": record.getMessage(),
