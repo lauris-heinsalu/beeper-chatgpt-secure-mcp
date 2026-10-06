@@ -1,0 +1,13 @@
+[Unit]
+Description=OpenAI Secure MCP Tunnel - Beeper
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/tunnel-client run --profile beeper --health.url-file %h/.config/openai-tunnel/health-url --log.file %h/.config/openai-tunnel/tunnel.log
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,15 @@
+# Runtime files are never publication material.
+.env
+.env.*
+*.log
+*.pem
+*.key
+*.zip
+*known_hosts*
+*known-hosts*
+beeper.yaml
+control-plane-api-key
+beeper-authorization
+tunnel-id
+health-url
+private/
