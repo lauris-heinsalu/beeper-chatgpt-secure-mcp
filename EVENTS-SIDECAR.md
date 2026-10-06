@@ -231,7 +231,10 @@ boundaries rather than only unit-test mocks:
   ChatGPT app usable; a live connected-account metadata call succeeded while
   the sidecar was down;
 - restarting the sidecar re-established the WebSocket automatically and
-  reconciliation again inserted zero duplicates.
+  reconciliation again inserted zero duplicates;
+- killing the sidecar process with `SIGKILL` exercised the ungraceful-crash
+  path: systemd restarted it after the configured five-second delay, the
+  WebSocket reconnected, and reconciliation again inserted zero duplicates.
 
 The unsupported boundary is still the important one: the separate OpenAI Events
 tunnel/app, callback subscription, signed webhook delivery, and actual ChatGPT
