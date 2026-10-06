@@ -1,43 +1,73 @@
-# ChatGPT to Beeper, with the MCP server kept private
+# ChatGPT ↔ Beeper: private MCP tools plus an isolated Events sidecar
 
-A small deployment case study: an official headless Beeper Server on an Oracle Cloud VM, reached from ChatGPT through OpenAI Secure MCP Tunnel.
+A small deployment case study and reference implementation for connecting a headless Beeper Server to ChatGPT without exposing Beeper's MCP listener to the public Internet.
 
-The original end-to-end test searched Beeper, read a conversation, and sent an explicitly authorized WhatsApp message. The useful result is a working combination of existing components, with a few setup details worth making easier for the next person.
+The **stable tool path** uses Beeper's native MCP endpoint unchanged for search, reads, and explicitly authorized sends. A second, deliberately isolated **Events sidecar** adds realtime incoming-message wakeups without proxying or replacing that working MCP server.
 
-**No custom MCP bridge was needed.** Beeper supplies the MCP tools; OpenAI's client supplies the tunnel transport. The Windows workstation used during setup is outside the deployed request path.
+> **Reusable pattern:** add MCP Events to an upstream MCP server without modifying or proxying its stable tool API. Keep the original MCP intact and attach a small event-only sidecar to the upstream application's realtime feed.
+
+The original end-to-end tool test searched Beeper, read a conversation, and sent one explicitly authorized WhatsApp message. The Events path was subsequently verified end-to-end with a filtered incoming-message subscription that woke a ChatGPT Cloud Work automation. The event payload contained identifiers and metadata, not message text.
+
+The Windows workstation used during setup is outside both deployed request paths. See [EVENTS-SIDECAR.md](EVENTS-SIDECAR.md) for the sidecar design, reliability model, security boundaries, deployment outline, and test status.
 
 ## Architecture
 
 ```mermaid
 flowchart TB
-    C[ChatGPT] --> A[Private custom MCP app]
-    A --> O[OpenAI-hosted tunnel service]
-    subgraph VM[Oracle Cloud VM]
-        T[tunnel-client · systemd user service]
-        B[Headless Beeper Server · native MCP]
-        K[Protected Beeper credential file]
-        T -->|Authenticated HTTP over loopback| B
-        K -.->|Authorization header| T
+    C["ChatGPT"]
+
+    subgraph Stable["Stable tool path"]
+        A["Private Beeper MCP app"]
+        O1["OpenAI Secure MCP Tunnel"]
+        T1["tunnel-client"]
+        B["Headless Beeper Server /v0/mcp"]
+        C --> A
+        A --> O1
+        T1 -->|"outbound HTTPS"| O1
+        T1 -->|"authenticated loopback HTTP"| B
     end
-    T -->|Outbound HTTPS: poll for requests and return results| O
-    B <--> N[Beeper-connected messaging networks]
-    N <--> W[WhatsApp]
+
+    subgraph EventPath["Isolated event path"]
+        S["beeper-events-sidecar"]
+        O2["Separate Secure MCP Tunnel"]
+        E["ChatGPT Cloud Work / MCP Events"]
+        B -->|"/v1/ws · message.upserted"| S
+        E -->|"discover + subscribe"| O2
+        S -->|"MCP 2026-07-28"| O2
+        S -->|"signed event webhook"| E
+    end
+
+    E -.->|"wake, then fetch context"| A
 ```
 
-The diagram distinguishes the **logical request path** from network initiation: the VM initiates the tunnel connection to OpenAI. OpenAI does not initiate a new public connection to the VM's Beeper port. This is the documented purpose of [Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels).
+The two paths are separate failure domains. If the sidecar, its state database, its Events tunnel, or the ChatGPT Events surface is unavailable, the native Beeper MCP path remains usable.
 
-“Private” describes the Beeper listener's network exposure. Tool inputs and results still pass through OpenAI, and messages still use Beeper and the connected messaging network. This is not a claim that message content stays solely on the VM.
+The diagram distinguishes logical flow from network initiation. Both tunnel clients initiate outbound connections to OpenAI; neither Beeper nor the sidecar needs a public inbound MCP listener. “Private” describes listener exposure, not end-to-end data locality: tool inputs/results still pass through OpenAI, and messages still use Beeper and their connected messaging network.
+
+## End-to-end Events result
+
+On **7 October 2026**, the isolated Events path was verified against ChatGPT's native automation/event surface:
+
+- the Events source was discovered successfully;
+- the sidecar advertised `message.created` with `account_ids`, `chat_ids`, and `sender_ids` filters;
+- self-authored test messages were observed by Beeper but correctly suppressed by the sidecar;
+- a narrowly filtered inbound test message produced a native MCP event and automatically triggered the subscribed Cloud Work automation;
+- the delivered event contained account/chat/message/sender identifiers and timestamps, but **no message text**;
+- immediately after delivery the sidecar reported one active subscription, no pending deliveries, no dead-letter deliveries, a connected source, and no source error.
+
+A separate ordinary-Chat experiment confirmed that Chat can use the sidecar's normal `events_status` MCP tool, but the native event-source discovery/subscription controls exposed in Cloud Work were not available in that Chat surface. That is recorded as an observed product-surface limitation, not a claim that the underlying Chat runtime could never support Events.
 
 ## What was verified
 
-Inspection date: **6 October 2026**.
+Inspection date: **7 October 2026**.
 
 | Component or check | Observed result |
 |---|---|
 | VM | Ubuntu 24.04.5 LTS, Linux ARM64 |
 | Beeper CLI | `0.6.2` |
-| Installed Beeper Server build | `nightly-4.3.178-1791273065056` |
+| Installed Beeper Server build | `nightly-4.3.181-1791315107868` (upgraded from 4.3.178 during the Events feasibility check) |
 | MCP-reported server identity | `beeper_desktop_api_api`, protocol-reported server version `4.2.2` |
+| Fresh MCP negotiation after the 4.3.181 upgrade | Still `2025-06-18`; native OpenAI MCP Events support was not exposed |
 | OpenAI tunnel client | `0.0.15`, commit `a390c168ff1b2d14e73a95991c186c6aba3ff5a0` |
 | Beeper listener | Loopback only, port `23374` |
 | Native MCP route | `/v0/mcp` |
@@ -48,6 +78,12 @@ Inspection date: **6 October 2026**.
 | User lingering | Enabled |
 | VM reboot recovery | Passed after adding the MCP startup wait; readiness observed at 28 seconds after boot |
 | Credential files inspected | Owner-only permissions (`0600`) |
+| Events source discovery | Succeeded; `message.created` and account/chat/sender filters advertised |
+| Self-authored incoming-message suppression | Verified in live test |
+| Cloud Work event wake-up | Verified end-to-end with a narrowly filtered inbound test event |
+| Event payload minimization | Verified; no message text in delivered payload |
+| Sidecar status after live delivery | Source connected; no source error; no pending or dead-letter deliveries |
+| Ordinary Chat Events subscription | Normal sidecar MCP tool callable; native subscription controls not exposed in the tested Chat surface |
 
 The original ChatGPT session and operator report establish the successful read/send test. The publication review independently rechecked the running configuration, local MCP initialization, tool discovery, and tunnel health. A subsequent VM reboot test exposed a startup-order failure. After adding the startup wait described below, a second reboot passed, including a connected-account metadata call through the actual custom app. No WhatsApp send was repeated, no private messages were read, and not every advertised tool was tested.
 
@@ -63,6 +99,8 @@ The installed build name and the version returned by MCP initialization are diff
 | OpenAI documents file/environment references for static MCP headers. | A concrete separation between the OpenAI runtime key and the Beeper access token. |
 | The tunnel client provides an optional wait for its MCP listener. | A real reboot failure reproduced without it, then successful automatic recovery after enabling it. |
 | Python's Windows password reader has character-level input behavior. | A practical diagnostic for a reported malformed-key setup failure, with an explicit evidence limit. |
+| Beeper exposes realtime `message.upserted` events over `/v1/ws`. | An event-only sidecar that turns those signals into durable, filtered MCP Events without replacing Beeper's native MCP tools. |
+| OpenAI MCP Events provides event discovery/subscription and signed webhook delivery. | A live-tested composition in which the event path wakes ChatGPT and the stable upstream MCP remains the context/action path. |
 
 References: [Beeper CLI](https://github.com/beeper/cli), [headless setup](https://github.com/beeper/cli/blob/main/packages/cli/docs/setup.md), [Beeper MCP](https://developers.beeper.com/desktop-api/mcp/), [Beeper authentication](https://developers.beeper.com/desktop-api/auth/), and [tunnel configuration at the inspected revision](https://github.com/openai/tunnel-client/blob/a390c168ff1b2d14e73a95991c186c6aba3ff5a0/docs/configuration.md).
 

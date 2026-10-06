@@ -1,0 +1,15 @@
+[Unit]
+Description=Beeper MCP Events sidecar
+After=network-online.target beeper-profile-server.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/beeper-chatgpt-secure-mcp
+ExecStart=%h/beeper-chatgpt-secure-mcp/.venv/bin/beeper-events-sidecar
+Restart=always
+RestartSec=5
+UMask=0077
+
+[Install]
+WantedBy=default.target

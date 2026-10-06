@@ -13,3 +13,14 @@ beeper-authorization
 tunnel-id
 health-url
 private/
+.venv/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+
+*.egg-info/
+build/
+dist/
