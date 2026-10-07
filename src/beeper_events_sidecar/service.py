@@ -406,6 +406,18 @@ class EventService:
                     pass
 
     async def _deliver(self, delivery: Any) -> None:
+        current_delivery = self.db.refresh_pending_delivery(
+            delivery,
+            now=isoformat_z(utc_now()),
+        )
+        if current_delivery is None:
+            logger.info(
+                "Skipping stale or cancelled webhook delivery: %s",
+                delivery.event_id,
+            )
+            return
+        delivery = current_delivery
+
         event = {
             "eventId": delivery.event_id,
             "name": delivery.source_event.name,
@@ -430,6 +442,10 @@ class EventService:
             if 200 <= status_code < 300:
                 self.db.mark_delivery_success(
                     delivery.event_id,
+                    subscription_id=delivery.subscription.id,
+                    subscription_created_at=(
+                        delivery.subscription.created_at
+                    ),
                     now=isoformat_z(utc_now()),
                     status_code=status_code,
                 )
@@ -444,6 +460,10 @@ class EventService:
             }:
                 self.db.mark_delivery_dead(
                     delivery.event_id,
+                    subscription_id=delivery.subscription.id,
+                    subscription_created_at=(
+                        delivery.subscription.created_at
+                    ),
                     now=isoformat_z(utc_now()),
                     status_code=None,
                     error=error,
@@ -468,6 +488,8 @@ class EventService:
         ):
             self.db.mark_delivery_dead(
                 delivery.event_id,
+                subscription_id=delivery.subscription.id,
+                subscription_created_at=delivery.subscription.created_at,
                 now=isoformat_z(utc_now()),
                 status_code=status_code,
                 error=error,
@@ -490,6 +512,8 @@ class EventService:
         next_attempt = utc_now() + timedelta(seconds=backoff)
         self.db.mark_delivery_retry(
             delivery.event_id,
+            subscription_id=delivery.subscription.id,
+            subscription_created_at=delivery.subscription.created_at,
             now=isoformat_z(utc_now()),
             next_attempt_at=isoformat_z(next_attempt),
             status_code=status_code,

@@ -419,15 +419,52 @@ class Database:
             )
         return deliveries
 
+    def refresh_pending_delivery(
+        self,
+        delivery: PendingDelivery,
+        *,
+        now: str,
+    ) -> PendingDelivery | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT s.*, d.attempt_count
+                FROM deliveries d
+                JOIN subscriptions s ON s.id = d.subscription_id
+                WHERE d.event_id = ?
+                  AND d.subscription_id = ?
+                  AND d.status = 'pending'
+                  AND s.active = 1
+                  AND s.created_at = ?
+                  AND (s.expires_at IS NULL OR s.expires_at > ?)
+                """,
+                (
+                    delivery.event_id,
+                    delivery.subscription.id,
+                    delivery.subscription.created_at,
+                    now,
+                ),
+            ).fetchone()
+        if row is None:
+            return None
+        return PendingDelivery(
+            subscription=self._subscription_from_row(row),
+            source_event=delivery.source_event,
+            event_id=delivery.event_id,
+            attempt_count=int(row["attempt_count"]),
+        )
+
     def mark_delivery_success(
         self,
         event_id: str,
         *,
+        subscription_id: str,
+        subscription_created_at: str,
         now: str,
         status_code: int,
-    ) -> None:
+    ) -> bool:
         with self._connect() as conn:
-            conn.execute(
+            cursor = conn.execute(
                 """
                 UPDATE deliveries
                 SET status = 'delivered',
@@ -437,21 +474,40 @@ class Database:
                     last_error = NULL,
                     delivered_at = ?
                 WHERE event_id = ?
+                  AND subscription_id = ?
+                  AND status = 'pending'
+                  AND EXISTS (
+                      SELECT 1
+                      FROM subscriptions s
+                      WHERE s.id = deliveries.subscription_id
+                        AND s.active = 1
+                        AND s.created_at = ?
+                  )
                 """,
-                (now, status_code, now, event_id),
+                (
+                    now,
+                    status_code,
+                    now,
+                    event_id,
+                    subscription_id,
+                    subscription_created_at,
+                ),
             )
+        return cursor.rowcount == 1
 
     def mark_delivery_retry(
         self,
         event_id: str,
         *,
+        subscription_id: str,
+        subscription_created_at: str,
         now: str,
         next_attempt_at: str,
         status_code: int | None,
         error: str,
-    ) -> None:
+    ) -> bool:
         with self._connect() as conn:
-            conn.execute(
+            cursor = conn.execute(
                 """
                 UPDATE deliveries
                 SET status = 'pending',
@@ -461,6 +517,15 @@ class Database:
                     last_status_code = ?,
                     last_error = ?
                 WHERE event_id = ?
+                  AND subscription_id = ?
+                  AND status = 'pending'
+                  AND EXISTS (
+                      SELECT 1
+                      FROM subscriptions s
+                      WHERE s.id = deliveries.subscription_id
+                        AND s.active = 1
+                        AND s.created_at = ?
+                  )
                 """,
                 (
                     now,
@@ -468,19 +533,24 @@ class Database:
                     status_code,
                     error[:2000],
                     event_id,
+                    subscription_id,
+                    subscription_created_at,
                 ),
             )
+        return cursor.rowcount == 1
 
     def mark_delivery_dead(
         self,
         event_id: str,
         *,
+        subscription_id: str,
+        subscription_created_at: str,
         now: str,
         status_code: int | None,
         error: str,
-    ) -> None:
+    ) -> bool:
         with self._connect() as conn:
-            conn.execute(
+            cursor = conn.execute(
                 """
                 UPDATE deliveries
                 SET status = 'dead_letter',
@@ -489,9 +559,26 @@ class Database:
                     last_status_code = ?,
                     last_error = ?
                 WHERE event_id = ?
+                  AND subscription_id = ?
+                  AND status = 'pending'
+                  AND EXISTS (
+                      SELECT 1
+                      FROM subscriptions s
+                      WHERE s.id = deliveries.subscription_id
+                        AND s.active = 1
+                        AND s.created_at = ?
+                  )
                 """,
-                (now, status_code, error[:2000], event_id),
+                (
+                    now,
+                    status_code,
+                    error[:2000],
+                    event_id,
+                    subscription_id,
+                    subscription_created_at,
+                ),
             )
+        return cursor.rowcount == 1
 
     def stats(self, now: str) -> dict[str, Any]:
         with self._connect() as conn:

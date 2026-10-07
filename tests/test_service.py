@@ -146,9 +146,33 @@ class StatusSender:
     def __init__(self, status: int):
         self.status = status
         self.event_ids = []
+        self.calls = []
+        self.verified = []
+
+    async def verify_callback(self, url, secret, subscription_id):
+        self.verified.append((url, secret, subscription_id))
 
     async def send_event(self, **kwargs):
         self.event_ids.append(kwargs["event"]["eventId"])
+        self.calls.append(kwargs)
+        return self.status
+
+
+class BlockingSender(StatusSender):
+    def __init__(self, status: int):
+        super().__init__(status)
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.verified = []
+
+    async def verify_callback(self, url, secret, subscription_id):
+        self.verified.append((url, secret, subscription_id))
+
+    async def send_event(self, **kwargs):
+        self.event_ids.append(kwargs["event"]["eventId"])
+        self.calls.append(kwargs)
+        self.started.set()
+        await self.release.wait()
         return self.status
 
 
@@ -202,6 +226,61 @@ def _delivery_fixture(tmp_path, sender):
     return db, service, delivery, now_text
 
 
+async def _mcp_delivery_fixture(tmp_path, sender, *, message_id: str):
+    import base64
+
+    from beeper_events_sidecar.mcp import McpApi
+    from beeper_events_sidecar.models import SourceEvent
+
+    settings = _settings(tmp_path)
+    db = Database(settings.db_path)
+    db.initialize()
+    service = EventService(
+        settings=settings,
+        db=db,
+        beeper=FakeBeeper([]),
+        webhook_sender=sender,
+    )
+    api = McpApi(
+        settings=settings,
+        db=db,
+        service=service,
+        webhook_sender=sender,
+    )
+    secret = "whsec_" + base64.b64encode(b"x" * 32).decode()
+    params = {
+        "name": "message.created",
+        "arguments": {},
+        "delivery": {
+            "mode": "webhook",
+            "url": "https://example.com/callback",
+            "secret": secret,
+        },
+        "cursor": None,
+    }
+    subscribed = await api._events_subscribe(params)
+
+    event_time = utc_now() + timedelta(seconds=1)
+    event = SourceEvent(
+        source_key=f"beeper:whatsapp:chat:{message_id}",
+        source_event_id=f"src-{message_id}",
+        name="message.created",
+        occurred_at=isoformat_z(event_time),
+        account_id="whatsapp",
+        chat_id="chat",
+        local_chat_id=None,
+        network="WhatsApp",
+        message_id=message_id,
+        sender_id="sender",
+        sender_name="Alice",
+        discovered_via="test",
+    )
+    due_at = isoformat_z(event_time + timedelta(seconds=1))
+    assert db.record_event_and_enqueue(event, now=due_at)
+    delivery = db.get_due_deliveries(due_at)[0]
+    return db, service, api, params, delivery, subscribed["id"], secret
+
+
 @pytest.mark.asyncio
 async def test_transient_delivery_failure_retries_same_event_id(tmp_path):
     sender = StatusSender(500)
@@ -216,6 +295,82 @@ async def test_transient_delivery_failure_retries_same_event_id(tmp_path):
     assert stats["dead_letter_deliveries"] == 0
     assert sender.event_ids == [delivery.event_id]
 
+
+@pytest.mark.asyncio
+async def test_unsubscribe_resubscribe_does_not_resurrect_inflight_retry(
+    tmp_path,
+):
+    sender = BlockingSender(500)
+    db, service, api, params, delivery, subscription_id, _secret = (
+        await _mcp_delivery_fixture(tmp_path, sender, message_id="m-race")
+    )
+
+    task = asyncio.create_task(service._deliver(delivery))
+    await asyncio.wait_for(sender.started.wait(), timeout=1.0)
+    api._events_unsubscribe(
+        {
+            "name": "message.created",
+            "arguments": {},
+            "delivery": {
+                "mode": "webhook",
+                "url": "https://example.com/callback",
+            },
+        }
+    )
+    await api._events_subscribe(params)
+    assert db.get_subscription(subscription_id) is not None
+
+    sender.release.set()
+    await asyncio.wait_for(task, timeout=1.0)
+
+    assert db.stats(isoformat_z(utc_now()))["pending_deliveries"] == 0
+
+
+@pytest.mark.asyncio
+async def test_stale_delivery_snapshot_is_not_sent_after_resubscribe(tmp_path):
+    sender = StatusSender(204)
+    db, service, api, params, delivery, _subscription_id, _secret = (
+        await _mcp_delivery_fixture(tmp_path, sender, message_id="m-stale")
+    )
+
+    api._events_unsubscribe(
+        {
+            "name": "message.created",
+            "arguments": {},
+            "delivery": {
+                "mode": "webhook",
+                "url": "https://example.com/callback",
+            },
+        }
+    )
+    await api._events_subscribe(params)
+
+    await service._deliver(delivery)
+
+    assert sender.event_ids == []
+    assert db.stats(isoformat_z(utc_now()))["pending_deliveries"] == 0
+
+
+@pytest.mark.asyncio
+async def test_delivery_refreshes_subscription_before_send(tmp_path):
+    import base64
+
+    sender = StatusSender(204)
+    _db, service, api, params, delivery, _subscription_id, secret_a = (
+        await _mcp_delivery_fixture(tmp_path, sender, message_id="m-rotate")
+    )
+    secret_b = "whsec_" + base64.b64encode(b"b" * 32).decode()
+    refreshed = {
+        **params,
+        "delivery": {**params["delivery"], "secret": secret_b},
+    }
+    await api._events_subscribe(refreshed)
+
+    await service._deliver(delivery)
+
+    assert len(sender.calls) == 1
+    assert sender.calls[0]["secret"] == secret_b
+    assert sender.calls[0]["previous_secret"] == secret_a
 
 @pytest.mark.asyncio
 async def test_http_410_goes_directly_to_dead_letter(tmp_path):
