@@ -44,6 +44,21 @@ async def test_callback_requires_https():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://example.com:99999/callback",
+        "https://[invalid/callback",
+    ],
+)
+async def test_callback_rejects_malformed_url(url):
+    client = CallbackHttpClient()
+    with pytest.raises(CallbackEndpointError) as exc:
+        await client.resolve_public(url)
+    assert exc.value.reason == "invalid_url"
+
+
+@pytest.mark.asyncio
 async def test_callback_post_reads_split_response_to_eof():
     first = b'{"challenge":"abc'
     second = b'def"}'

@@ -1,3 +1,5 @@
+import asyncio
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -38,6 +40,39 @@ def _settings(tmp_path: Path) -> Settings:
         callback_timeout_seconds=10,
         log_level="INFO",
     )
+
+
+@pytest.mark.asyncio
+async def test_beeper_authorization_read_is_offloaded_and_rotates(
+    tmp_path,
+    monkeypatch,
+):
+    settings = _settings(tmp_path)
+    client = BeeperClient(settings, RecordingSession())
+    original_read_text = Path.read_text
+
+    def slow_read_text(path, *args, **kwargs):
+        time.sleep(0.05)
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", slow_read_text)
+    task = asyncio.create_task(client._authorization())
+    await asyncio.sleep(0.01)
+    assert not task.done()
+    assert await task == "Bearer test-secret"
+
+    settings.beeper_auth_file.write_text(
+        "Bearer rotated-secret", encoding="utf-8"
+    )
+    assert await client._authorization() == "Bearer rotated-secret"
+
+    settings.beeper_auth_file.write_text("Bearer ", encoding="utf-8")
+    with pytest.raises(BeeperError, match="Invalid Beeper Authorization"):
+        await client._authorization()
+
+    settings.beeper_auth_file.unlink()
+    with pytest.raises(BeeperError, match="Could not read Beeper Authorization"):
+        await client._authorization()
 
 
 @pytest.mark.asyncio

@@ -34,10 +34,19 @@ class BeeperClient:
         self.session = session
         self._chat_cache: OrderedDict[str, dict[str, Any]] = OrderedDict()
 
-    def _authorization(self) -> str:
-        value = self.settings.beeper_auth_file.read_text(
-            encoding="utf-8"
-        ).strip()
+    async def _authorization(self) -> str:
+        try:
+            value = (
+                await asyncio.to_thread(
+                    self.settings.beeper_auth_file.read_text,
+                    encoding="utf-8",
+                )
+            ).strip()
+        except OSError as exc:
+            raise BeeperError(
+                f"Could not read Beeper Authorization file: "
+                f"{self.settings.beeper_auth_file}"
+            ) from exc
         if not value.startswith("Bearer ") or len(value) <= len("Bearer "):
             raise BeeperError(
                 f"Invalid Beeper Authorization file: "
@@ -45,8 +54,8 @@ class BeeperClient:
             )
         return value
 
-    def _headers(self) -> dict[str, str]:
-        return {"Authorization": self._authorization()}
+    async def _headers(self) -> dict[str, str]:
+        return {"Authorization": await self._authorization()}
 
     async def _get_json(
         self,
@@ -56,7 +65,7 @@ class BeeperClient:
         authenticated: bool = True,
     ) -> dict[str, Any]:
         url = f"{self.settings.beeper_base_url}{path}"
-        headers = self._headers() if authenticated else {}
+        headers = await self._headers() if authenticated else {}
         async with self.session.get(
             url,
             params=params,
@@ -261,7 +270,7 @@ class BeeperClient:
 
         ws = await self.session.ws_connect(
             ws_url,
-            headers=self._headers(),
+            headers=await self._headers(),
             heartbeat=30,
             autoping=True,
             timeout=cast(Any, aiohttp.ClientWSTimeout)(

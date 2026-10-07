@@ -87,7 +87,14 @@ class CallbackHttpClient:
         self.timeout_seconds = timeout_seconds
 
     async def resolve_public(self, url: str) -> ResolvedCallback:
-        parts = urlsplit(url)
+        try:
+            parts = urlsplit(url)
+            hostname = parts.hostname
+            port = parts.port or 443
+        except ValueError as exc:
+            raise CallbackEndpointError(
+                "invalid_url", "Callback URL is malformed"
+            ) from exc
         if parts.scheme != "https":
             raise CallbackEndpointError(
                 "invalid_url", "Callback URL must use HTTPS"
@@ -97,7 +104,7 @@ class CallbackHttpClient:
                 "invalid_url",
                 "Callback URL must not contain user information",
             )
-        if not parts.hostname:
+        if not hostname:
             raise CallbackEndpointError(
                 "invalid_url", "Callback URL is missing a hostname"
             )
@@ -106,11 +113,10 @@ class CallbackHttpClient:
                 "invalid_url", "Callback URL must not contain a fragment"
             )
 
-        port = parts.port or 443
         loop = asyncio.get_running_loop()
         try:
             results = await loop.getaddrinfo(
-                parts.hostname,
+                hostname,
                 port,
                 type=socket.SOCK_STREAM,
             )
@@ -150,7 +156,7 @@ class CallbackHttpClient:
 
         return ResolvedCallback(
             url=url,
-            hostname=parts.hostname,
+            hostname=hostname,
             port=port,
             addresses=tuple(addresses),
         )

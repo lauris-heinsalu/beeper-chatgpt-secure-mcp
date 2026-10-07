@@ -70,7 +70,7 @@ class _BearerSecretCache:
                 )
                 raise _BearerSecretUnavailable from exc
 
-            if not value.startswith("Bearer "):
+            if not value.startswith("Bearer ") or len(value) <= len("Bearer "):
                 self._value = None
                 self._refresh_after = (
                     time.monotonic() + self._refresh_seconds

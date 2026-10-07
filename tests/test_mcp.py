@@ -554,6 +554,14 @@ async def test_bearer_secret_rotation_and_refresh_failure_fail_closed(tmp_path):
             headers={"Authorization": "Bearer second-secret"},
         )
         assert malformed.status == 503
+
+        settings.mcp_bearer_file.write_text("Bearer ", encoding="utf-8")
+        empty = await client.post(
+            "/mcp",
+            json=payload,
+            headers={"Authorization": "Bearer "},
+        )
+        assert empty.status == 503
     finally:
         await client.close()
 
