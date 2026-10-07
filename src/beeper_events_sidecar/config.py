@@ -31,6 +31,7 @@ class Settings:
     log_level: str
     delivery_concurrency: int = 4
     mcp_bearer_refresh_seconds: int = 2
+    chat_cache_size: int = 512
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -115,5 +116,9 @@ class Settings:
             mcp_bearer_refresh_seconds=max(
                 0,
                 _env_int("BEEPER_EVENTS_MCP_BEARER_REFRESH_SECONDS", 2),
+            ),
+            chat_cache_size=max(
+                0,
+                _env_int("BEEPER_EVENTS_CHAT_CACHE_SIZE", 512),
             ),
         )

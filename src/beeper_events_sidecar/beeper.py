@@ -4,6 +4,7 @@ import asyncio
 import ipaddress
 import json
 import logging
+from collections import OrderedDict
 from collections.abc import AsyncIterator
 from typing import Any, cast
 from urllib.parse import urlsplit, urlunsplit
@@ -31,7 +32,7 @@ class BeeperClient:
     ) -> None:
         self.settings = settings
         self.session = session
-        self._chat_cache: dict[str, dict[str, Any]] = {}
+        self._chat_cache: OrderedDict[str, dict[str, Any]] = OrderedDict()
 
     def _authorization(self) -> str:
         value = self.settings.beeper_auth_file.read_text(
@@ -84,9 +85,16 @@ class BeeperClient:
     async def chat_metadata(self, chat_id: str) -> dict[str, Any]:
         cached = self._chat_cache.get(chat_id)
         if cached is not None:
+            self._chat_cache.move_to_end(chat_id)
             return cached
+
         value = await self._get_json(f"/v1/chats/{chat_id}")
-        self._chat_cache[chat_id] = value
+        cache_size = self.settings.chat_cache_size
+        if cache_size > 0:
+            self._chat_cache[chat_id] = value
+            self._chat_cache.move_to_end(chat_id)
+            while len(self._chat_cache) > cache_size:
+                self._chat_cache.popitem(last=False)
         return value
 
     async def message(

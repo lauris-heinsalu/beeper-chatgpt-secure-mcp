@@ -100,6 +100,32 @@ async def test_message_search_streams_pages_and_dedupes(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_chat_metadata_cache_is_bounded_lru(tmp_path, monkeypatch):
+    settings = replace(_settings(tmp_path), chat_cache_size=2)
+    client = BeeperClient(settings, RecordingSession())
+    calls = []
+
+    async def fake_get_json(path, *, params=None, authenticated=True):
+        calls.append(path)
+        chat_id = path.rsplit("/", 1)[-1]
+        return {"id": chat_id}
+
+    monkeypatch.setattr(client, "_get_json", fake_get_json)
+
+    assert (await client.chat_metadata("chat-a"))["id"] == "chat-a"
+    assert (await client.chat_metadata("chat-b"))["id"] == "chat-b"
+    assert (await client.chat_metadata("chat-a"))["id"] == "chat-a"
+    assert (await client.chat_metadata("chat-c"))["id"] == "chat-c"
+    assert list(client._chat_cache) == ["chat-a", "chat-c"]
+
+    assert (await client.chat_metadata("chat-b"))["id"] == "chat-b"
+    assert calls.count("/v1/chats/chat-a") == 1
+    assert calls.count("/v1/chats/chat-b") == 2
+    assert calls.count("/v1/chats/chat-c") == 1
+    assert list(client._chat_cache) == ["chat-c", "chat-b"]
+
+
+@pytest.mark.asyncio
 async def test_event_websocket_rejects_cross_origin_endpoint(tmp_path, monkeypatch):
     session = RecordingSession()
     client = BeeperClient(_settings(tmp_path), session)
