@@ -1,6 +1,10 @@
+import sqlite3
 from dataclasses import replace
 from datetime import timedelta
 
+import pytest
+
+import beeper_events_sidecar.db as db_module
 from beeper_events_sidecar.db import Database
 from beeper_events_sidecar.models import (
     SourceEvent,
@@ -41,6 +45,27 @@ def _event(timestamp: str, message_id: str = "m1") -> SourceEvent:
         sender_name="Alice",
         discovered_via="test",
     )
+
+
+def test_database_context_closes_connections(tmp_path, monkeypatch):
+    real_connect = sqlite3.connect
+    connections = []
+
+    def tracking_connect(*args, **kwargs):
+        conn = real_connect(*args, **kwargs)
+        connections.append(conn)
+        return conn
+
+    monkeypatch.setattr(db_module.sqlite3, "connect", tracking_connect)
+
+    db = Database(tmp_path / "state.sqlite3")
+    db.initialize()
+    db.stats(isoformat_z(utc_now()))
+
+    assert connections
+    for conn in connections:
+        with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+            conn.execute("SELECT 1")
 
 
 def test_event_insert_is_idempotent_and_enqueues_once(tmp_path):
