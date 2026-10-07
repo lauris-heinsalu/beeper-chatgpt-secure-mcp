@@ -346,11 +346,28 @@ class EventService:
         *,
         now_text: str,
     ) -> tuple[int, int]:
+        scanned_count = 0
+        inserted_count = 0
         try:
-            messages = await self.beeper.search_messages(
+            async for message in self.beeper.search_messages(
                 date_after=isoformat_z(lower_bound),
                 date_before=isoformat_z(upper_bound),
-            )
+            ):
+                scanned_count += 1
+                normalized = await self._normalize_message(
+                    message,
+                    discovered_via="reconciliation",
+                )
+                if normalized is None:
+                    continue
+                inserted = await self.db.run_async(
+                    self.db.record_event_and_enqueue,
+                    normalized,
+                    now=now_text,
+                    deliverable=True,
+                )
+                if inserted:
+                    inserted_count += 1
         except ReconciliationWindowTooLarge:
             window = upper_bound - lower_bound
             if window <= timedelta(seconds=1):
@@ -371,28 +388,14 @@ class EventService:
                 upper_bound,
                 now_text=now_text,
             )
+            # Any rows persisted before the oversized signal are idempotently
+            # re-read by the split windows and deliberately not double-counted.
             return (
                 older_scanned + newer_scanned,
                 older_inserted + newer_inserted,
             )
 
-        inserted_count = 0
-        for message in messages:
-            normalized = await self._normalize_message(
-                message,
-                discovered_via="reconciliation",
-            )
-            if normalized is None:
-                continue
-            inserted = await self.db.run_async(
-                self.db.record_event_and_enqueue,
-                normalized,
-                now=now_text,
-                deliverable=True,
-            )
-            if inserted:
-                inserted_count += 1
-        return len(messages), inserted_count
+        return scanned_count, inserted_count
 
     async def reconcile_once(self) -> None:
         async with self._reconcile_lock:

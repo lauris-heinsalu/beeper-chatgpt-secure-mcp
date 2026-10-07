@@ -24,7 +24,8 @@ class FakeBeeper:
         self.hydrated = hydrated or {}
 
     async def search_messages(self, *, date_after, date_before):
-        return list(self.messages)
+        for message in self.messages:
+            yield message
 
     async def message(self, chat_id, message_id):
         return self.hydrated[(chat_id, message_id)]
@@ -47,13 +48,17 @@ class WindowLimitedBeeper(FakeBeeper):
         lower = parse_timestamp(date_after)
         upper = parse_timestamp(date_before)
         self.calls.append((lower, upper))
-        if (upper - lower).total_seconds() > self.max_window_seconds:
-            raise ReconciliationWindowTooLarge("window too large")
-        return [
+        matching = [
             message
             for message in self.messages
             if lower < parse_timestamp(message["timestamp"]) < upper
         ]
+        if (upper - lower).total_seconds() > self.max_window_seconds:
+            if matching:
+                yield matching[0]
+            raise ReconciliationWindowTooLarge("window too large")
+        for message in matching:
+            yield message
 
 
 class UnusedSender:

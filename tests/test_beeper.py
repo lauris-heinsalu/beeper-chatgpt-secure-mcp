@@ -41,6 +41,65 @@ def _settings(tmp_path: Path) -> Settings:
 
 
 @pytest.mark.asyncio
+async def test_message_search_streams_pages_and_dedupes(tmp_path, monkeypatch):
+    client = BeeperClient(_settings(tmp_path), RecordingSession())
+    calls = []
+
+    async def fake_get_json(path, *, params=None, authenticated=True):
+        assert path == "/v1/messages/search"
+        assert authenticated is True
+        calls.append(dict(params or {}))
+        if len(calls) == 1:
+            return {
+                "items": [
+                    {
+                        "id": "m-newer",
+                        "chatID": "chat-a",
+                        "timestamp": "2026-10-07T10:02:00Z",
+                    },
+                    {
+                        "id": "m-new",
+                        "chatID": "chat-a",
+                        "timestamp": "2026-10-07T10:01:00Z",
+                    },
+                ],
+                "hasMore": True,
+                "oldestCursor": "cursor-1",
+            }
+        return {
+            "items": [
+                {
+                    "id": "m-new",
+                    "chatID": "chat-a",
+                    "timestamp": "2026-10-07T10:01:00Z",
+                },
+                {
+                    "id": "m-old",
+                    "chatID": "chat-a",
+                    "timestamp": "2026-10-07T09:59:00Z",
+                },
+            ],
+            "hasMore": False,
+        }
+
+    monkeypatch.setattr(client, "_get_json", fake_get_json)
+
+    stream = client.search_messages(
+        date_after="2026-10-07T09:00:00Z",
+        date_before="2026-10-07T11:00:00Z",
+    )
+    first = await anext(stream)
+    assert first["id"] == "m-new"
+    assert len(calls) == 1
+
+    remaining = [item async for item in stream]
+    assert [item["id"] for item in remaining] == ["m-newer", "m-old"]
+    assert len(calls) == 2
+    assert calls[1]["cursor"] == "cursor-1"
+    assert calls[1]["direction"] == "before"
+
+
+@pytest.mark.asyncio
 async def test_event_websocket_rejects_cross_origin_endpoint(tmp_path, monkeypatch):
     session = RecordingSession()
     client = BeeperClient(_settings(tmp_path), session)

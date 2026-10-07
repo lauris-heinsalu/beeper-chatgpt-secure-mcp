@@ -103,8 +103,8 @@ class BeeperClient:
         *,
         date_after: str,
         date_before: str,
-    ) -> list[dict[str, Any]]:
-        items: dict[tuple[str, str], dict[str, Any]] = {}
+    ) -> AsyncIterator[dict[str, Any]]:
+        seen: set[tuple[str, str]] = set()
         cursor: str | None = None
         page_count = 0
 
@@ -137,15 +137,32 @@ class BeeperClient:
                     "Message search returned a non-list items field"
                 )
 
+            valid_items: list[dict[str, Any]] = []
             for item in page_items:
                 if not isinstance(item, dict):
                     continue
                 chat_id = item.get("chatID")
                 message_id = item.get("id") or item.get("messageID")
-                if isinstance(chat_id, str) and isinstance(
+                if not isinstance(chat_id, str) or not isinstance(
                     message_id, str
                 ):
-                    items[(chat_id, message_id)] = item
+                    continue
+                identity = (chat_id, message_id)
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                valid_items.append(item)
+
+            # Keep deterministic ordering inside each bounded page while
+            # allowing already-consumed message objects to be released.
+            valid_items.sort(
+                key=lambda item: (
+                    str(item.get("timestamp") or ""),
+                    str(item.get("id") or item.get("messageID") or ""),
+                )
+            )
+            for item in valid_items:
+                yield item
 
             if not data.get("hasMore"):
                 break
@@ -161,14 +178,6 @@ class BeeperClient:
                     "a usable pagination cursor"
                 )
             cursor = next_cursor
-
-        return sorted(
-            items.values(),
-            key=lambda item: (
-                str(item.get("timestamp") or ""),
-                str(item.get("id") or item.get("messageID") or ""),
-            ),
-        )
 
     @staticmethod
     def _is_loopback_host(hostname: str) -> bool:
