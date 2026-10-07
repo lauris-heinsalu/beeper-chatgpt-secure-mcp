@@ -237,6 +237,13 @@ print("Created owner-only MCP bearer file.")
 PY
 ```
 
+The defaults require no tuning for the small private deployment. Optional
+controls include `BEEPER_EVENTS_DELIVERY_CONCURRENCY` (default `4`),
+`BEEPER_EVENTS_MCP_BEARER_REFRESH_SECONDS` (default `2`), and
+`BEEPER_EVENTS_CHAT_CACHE_SIZE` (default `512`; `0` disables that cache).
+The Beeper Authorization file itself is read off the event loop on use, so
+credential rotation remains visible without restarting the sidecar.
+
 Install and start [`examples/beeper-events-sidecar.service`](examples/beeper-events-sidecar.service).
 
 Create a **separate OpenAI tunnel** for Events. Copy
@@ -256,32 +263,37 @@ changing the already-working native Beeper MCP app.
 
 ## Automated test coverage
 
-The private checkpoint was validated on **7 October 2026** with:
+The release candidate was validated on **7 October 2026** with:
 
 ```text
-pytest -q
-21 passed
+pytest -q -W error
+51 passed
 
 ruff check src tests
 All checks passed!
 
-mypy --ignore-missing-imports src
+mypy --no-incremental --ignore-missing-imports src
 Success: no issues found in 9 source files
 ```
 
+CI runs the same quality gates on Python 3.12 and 3.14 and also builds a wheel.
 The tests cover, among other things:
 
 - idempotent source-event insertion and single outbox enqueue;
 - persistent/idempotent subscriptions and signing-secret rotation;
-- discovery surface and MCP bearer enforcement;
-- unsubscribe/resubscribe behavior;
+- discovery surface and fail-closed MCP bearer enforcement and rotation;
+- unsubscribe/resubscribe and in-flight mutation races;
+- SQLite offload from the event loop with serialized DB access;
+- bounded concurrent webhook delivery;
+- page-streamed reconciliation, deduplication, and oversized-window recovery;
+- bounded LRU chat-metadata caching;
 - reconciliation of a missed message exactly once at the logical level;
 - self-authored message suppression;
 - transient delivery retry with the same event ID;
 - HTTP 410 dead-letter handling;
 - partial WebSocket-event hydration;
-- callback HTTPS/public-destination validation;
-- callback verification; and
+- callback HTTPS/public-destination and malformed-URL validation;
+- callback verification and bounded response bodies; and
 - dual signatures during secret rotation.
 
 ## Live reliability pass
