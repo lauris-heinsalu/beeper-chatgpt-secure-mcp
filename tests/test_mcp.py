@@ -148,7 +148,7 @@ async def test_unsubscribe_during_verification_prevents_stale_reactivation(
 
     subscribe_task = asyncio.create_task(api._events_subscribe(params))
     await asyncio.wait_for(sender.started.wait(), timeout=1.0)
-    api._events_unsubscribe(
+    await api._events_unsubscribe(
         {
             "name": "message.created",
             "arguments": {},
@@ -300,7 +300,7 @@ async def test_subscription_filter_order_has_one_canonical_identity(tmp_path):
     }
     assert db.stats(isoformat_z(utc_now()))["active_subscriptions"] == 1
 
-    api._events_unsubscribe(
+    await api._events_unsubscribe(
         {
             "name": "message.created",
             "arguments": {
@@ -316,7 +316,8 @@ async def test_subscription_filter_order_has_one_canonical_identity(tmp_path):
     assert db.stats(isoformat_z(utc_now()))["active_subscriptions"] == 0
 
 
-def test_unsubscribe_unknown_event_remains_idempotent_with_bad_arguments(
+@pytest.mark.asyncio
+async def test_unsubscribe_unknown_event_remains_idempotent_with_bad_arguments(
     tmp_path,
 ):
     settings = _settings(tmp_path)
@@ -329,7 +330,7 @@ def test_unsubscribe_unknown_event_remains_idempotent_with_bad_arguments(
         webhook_sender=FakeSender(),
     )
 
-    assert api._events_unsubscribe(
+    assert await api._events_unsubscribe(
         {
             "name": "unknown.event",
             "arguments": [],
@@ -500,7 +501,7 @@ async def test_unsubscribe_cancels_pending_and_resubscribe_starts_fresh(
     )
     assert db.stats(isoformat_z(event_time))["pending_deliveries"] == 1
 
-    api._events_unsubscribe(
+    await api._events_unsubscribe(
         {
             "name": "message.created",
             "arguments": {},

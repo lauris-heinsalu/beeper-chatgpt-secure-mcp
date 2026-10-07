@@ -29,6 +29,7 @@ class Settings:
     callback_verification_cache_seconds: int
     callback_timeout_seconds: int
     log_level: str
+    delivery_concurrency: int = 4
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -106,4 +107,8 @@ class Settings:
                 "BEEPER_EVENTS_CALLBACK_TIMEOUT_SECONDS", 10
             ),
             log_level=os.getenv("BEEPER_EVENTS_LOG_LEVEL", "INFO").upper(),
+            delivery_concurrency=max(
+                1,
+                _env_int("BEEPER_EVENTS_DELIVERY_CONCURRENCY", 4),
+            ),
         )

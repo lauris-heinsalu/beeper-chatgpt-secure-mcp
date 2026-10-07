@@ -10,7 +10,7 @@ import secrets
 import socket
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlsplit
 
 import aiohttp
@@ -168,7 +168,9 @@ class CallbackHttpClient:
             use_dns_cache=False,
             force_close=True,
         )
-        timeout = aiohttp.ClientTimeout(total=self.timeout_seconds)
+        timeout = cast(Any, aiohttp.ClientTimeout)(
+            total=self.timeout_seconds
+        )
         async with aiohttp.ClientSession(
             connector=connector,
             timeout=timeout,

@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 from .models import (
     PendingDelivery,
@@ -15,6 +16,8 @@ from .models import (
     canonical_json,
     stable_id,
 )
+
+_T = TypeVar("_T")
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS subscriptions (
@@ -86,6 +89,17 @@ CREATE TABLE IF NOT EXISTS checkpoints (
 class Database:
     def __init__(self, path: Path) -> None:
         self.path = path
+        self._async_lock = asyncio.Lock()
+
+    async def run_async(
+        self,
+        function: Callable[..., _T],
+        /,
+        *args: Any,
+        **kwargs: Any,
+    ) -> _T:
+        async with self._async_lock:
+            return await asyncio.to_thread(function, *args, **kwargs)
 
     def initialize(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)

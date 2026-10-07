@@ -54,12 +54,21 @@ class EventService:
         self.last_source_error: str | None = None
 
     async def start(self) -> None:
-        self.db.initialize()
+        await self.db.run_async(self.db.initialize)
         now = isoformat_z(utc_now())
-        if self.db.get_checkpoint(_CHECKPOINT_NAME) is None:
+        checkpoint = await self.db.run_async(
+            self.db.get_checkpoint,
+            _CHECKPOINT_NAME,
+        )
+        if checkpoint is None:
             # First deployment is a clean baseline: do not turn historical
             # messages into fresh notifications.
-            self.db.set_checkpoint(_CHECKPOINT_NAME, now, now)
+            await self.db.run_async(
+                self.db.set_checkpoint,
+                _CHECKPOINT_NAME,
+                now,
+                now,
+            )
             logger.info("Initialized reconciliation checkpoint at %s", now)
 
         self._reconcile_requested.set()
@@ -193,7 +202,8 @@ class EventService:
             )
             if normalized is None:
                 continue
-            inserted = self.db.record_event_and_enqueue(
+            inserted = await self.db.run_async(
+                self.db.record_event_and_enqueue,
                 normalized,
                 now=isoformat_z(utc_now()),
                 deliverable=True,
@@ -374,23 +384,31 @@ class EventService:
             )
             if normalized is None:
                 continue
-            if self.db.record_event_and_enqueue(
+            inserted = await self.db.run_async(
+                self.db.record_event_and_enqueue,
                 normalized,
                 now=now_text,
                 deliverable=True,
-            ):
+            )
+            if inserted:
                 inserted_count += 1
         return len(messages), inserted_count
 
     async def reconcile_once(self) -> None:
         async with self._reconcile_lock:
-            checkpoint = self.db.get_checkpoint(_CHECKPOINT_NAME)
+            checkpoint = await self.db.run_async(
+                self.db.get_checkpoint,
+                _CHECKPOINT_NAME,
+            )
             upper_bound = utc_now()
             now_text = isoformat_z(upper_bound)
 
             if checkpoint is None:
-                self.db.set_checkpoint(
-                    _CHECKPOINT_NAME, now_text, now_text
+                await self.db.run_async(
+                    self.db.set_checkpoint,
+                    _CHECKPOINT_NAME,
+                    now_text,
+                    now_text,
                 )
                 self.last_reconcile_at = now_text
                 return
@@ -407,8 +425,11 @@ class EventService:
             # Advance only after every split window completes successfully.
             # upper_bound was captured before scanning, so messages arriving
             # during reconciliation remain eligible for the next overlap.
-            self.db.set_checkpoint(
-                _CHECKPOINT_NAME, now_text, now_text
+            await self.db.run_async(
+                self.db.set_checkpoint,
+                _CHECKPOINT_NAME,
+                now_text,
+                now_text,
             )
             self.last_reconcile_at = now_text
             logger.info(
@@ -422,7 +443,11 @@ class EventService:
             try:
                 now = utc_now()
                 now_text = isoformat_z(now)
-                deliveries = self.db.get_due_deliveries(now_text, limit=20)
+                deliveries = await self.db.run_async(
+                    self.db.get_due_deliveries,
+                    now_text,
+                    20,
+                )
                 if not deliveries:
                     try:
                         await asyncio.wait_for(
@@ -432,10 +457,7 @@ class EventService:
                         pass
                     continue
 
-                for delivery in deliveries:
-                    if self._stop.is_set():
-                        return
-                    await self._deliver(delivery)
+                await self._deliver_batch(deliveries)
             except asyncio.CancelledError:
                 raise
             except sqlite3.OperationalError as exc:
@@ -448,8 +470,37 @@ class EventService:
                 except TimeoutError:
                     pass
 
+    async def _deliver_capturing(self, delivery: Any) -> Exception | None:
+        try:
+            await self._deliver(delivery)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - re-raised after batch joins
+            return exc
+        return None
+
+    async def _deliver_batch(self, deliveries: list[Any]) -> None:
+        concurrency = max(1, self.settings.delivery_concurrency)
+        for offset in range(0, len(deliveries), concurrency):
+            if self._stop.is_set():
+                return
+            chunk = deliveries[offset : offset + concurrency]
+            tasks: list[asyncio.Task[Exception | None]] = []
+            async with asyncio.TaskGroup() as group:
+                for delivery in chunk:
+                    tasks.append(
+                        group.create_task(
+                            self._deliver_capturing(delivery)
+                        )
+                    )
+            for task in tasks:
+                error = task.result()
+                if error is not None:
+                    raise error
+
     async def _deliver(self, delivery: Any) -> None:
-        current_delivery = self.db.refresh_pending_delivery(
+        current_delivery = await self.db.run_async(
+            self.db.refresh_pending_delivery,
             delivery,
             now=isoformat_z(utc_now()),
         )
@@ -483,7 +534,8 @@ class EventService:
                 ),
             )
             if 200 <= status_code < 300:
-                self.db.mark_delivery_success(
+                await self.db.run_async(
+                    self.db.mark_delivery_success,
                     delivery.event_id,
                     subscription_id=delivery.subscription.id,
                     subscription_created_at=(
@@ -501,7 +553,8 @@ class EventService:
                 "private_address",
                 "payload_too_large",
             }:
-                self.db.mark_delivery_dead(
+                await self.db.run_async(
+                    self.db.mark_delivery_dead,
                     delivery.event_id,
                     subscription_id=delivery.subscription.id,
                     subscription_created_at=(
@@ -529,7 +582,8 @@ class EventService:
             or attempts_after_this
             >= self.settings.delivery_max_attempts
         ):
-            self.db.mark_delivery_dead(
+            await self.db.run_async(
+                self.db.mark_delivery_dead,
                 delivery.event_id,
                 subscription_id=delivery.subscription.id,
                 subscription_created_at=delivery.subscription.created_at,
@@ -553,7 +607,8 @@ class EventService:
             self.settings.delivery_max_backoff_seconds,
         )
         next_attempt = utc_now() + timedelta(seconds=backoff)
-        self.db.mark_delivery_retry(
+        await self.db.run_async(
+            self.db.mark_delivery_retry,
             delivery.event_id,
             subscription_id=delivery.subscription.id,
             subscription_created_at=delivery.subscription.created_at,
@@ -568,8 +623,7 @@ class EventService:
             error,
         )
 
-    def status(self) -> dict[str, Any]:
-        now = isoformat_z(utc_now())
+    def _status_runtime(self) -> dict[str, Any]:
         workers = {
             task.get_name(): (
                 "cancelled"
@@ -593,6 +647,25 @@ class EventService:
             "last_source_error": self.last_source_error,
             "workers_healthy": workers_healthy,
             "workers": workers,
+        }
+
+    def status(self) -> dict[str, Any]:
+        now = isoformat_z(utc_now())
+        return {
+            **self._status_runtime(),
             "checkpoint": self.db.get_checkpoint(_CHECKPOINT_NAME),
             **self.db.stats(now),
+        }
+
+    async def status_async(self) -> dict[str, Any]:
+        now = isoformat_z(utc_now())
+        checkpoint = await self.db.run_async(
+            self.db.get_checkpoint,
+            _CHECKPOINT_NAME,
+        )
+        stats = await self.db.run_async(self.db.stats, now)
+        return {
+            **self._status_runtime(),
+            "checkpoint": checkpoint,
+            **stats,
         }

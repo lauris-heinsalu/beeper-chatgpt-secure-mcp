@@ -72,6 +72,12 @@ class McpApi:
                 "Subscription request was superseded by a newer mutation",
             )
 
+    async def _service_status(self) -> dict[str, Any]:
+        status_async = getattr(self.service, "status_async", None)
+        if callable(status_async):
+            return await status_async()
+        return self.service.status()
+
     def application(self) -> web.Application:
         app = web.Application(
             client_max_size=4 * 1024 * 1024,
@@ -120,7 +126,7 @@ class McpApi:
 
     async def health(self, _request: web.Request) -> web.Response:
         try:
-            status = self.service.status()
+            status = await self._service_status()
         except Exception:
             logger.exception("Health check failed")
             return web.json_response(
@@ -142,7 +148,7 @@ class McpApi:
         # subscriptions. Beeper source health is intentionally separate so
         # a temporary messaging outage does not make the control plane vanish.
         try:
-            status = self.service.status()
+            status = await self._service_status()
         except Exception:
             logger.exception("Readiness check failed")
             return web.json_response(
@@ -226,11 +232,11 @@ class McpApi:
         if method == "events/subscribe":
             return await self._events_subscribe(params)
         if method == "events/unsubscribe":
-            return self._events_unsubscribe(params)
+            return await self._events_unsubscribe(params)
         if method == "tools/list":
             return self._tools_list()
         if method == "tools/call":
-            return self._tools_call(params)
+            return await self._tools_call(params)
         raise RpcError(-32601, f"Method not found: {method}")
 
     @staticmethod
@@ -360,7 +366,14 @@ class McpApi:
             canonical_json(arguments),
         )
         mutation_token = self._next_subscription_mutation(identity)
-        existing = self.db.get_subscription(identity)
+        existing = await self.db.run_async(
+            self.db.get_subscription,
+            identity,
+        )
+        self._require_current_subscription_mutation(
+            identity,
+            mutation_token,
+        )
 
         now = utc_now()
         now_text = isoformat_z(now)
@@ -372,11 +385,17 @@ class McpApi:
                 or parse_timestamp(existing.expires_at) > now
             )
         )
-        if not self.db.callback_verification_valid(
+        callback_verified = await self.db.run_async(
+            self.db.callback_verification_valid,
             _PRINCIPAL,
             callback_url,
             now_text,
-        ):
+        )
+        self._require_current_subscription_mutation(
+            identity,
+            mutation_token,
+        )
+        if not callback_verified:
             try:
                 await self.webhook_sender.verify_callback(
                     callback_url,
@@ -393,7 +412,8 @@ class McpApi:
                 identity,
                 mutation_token,
             )
-            self.db.mark_callback_verified(
+            await self.db.run_async(
+                self.db.mark_callback_verified,
                 _PRINCIPAL,
                 callback_url,
                 verified_at=now_text,
@@ -407,9 +427,21 @@ class McpApi:
                     )
                 ),
             )
+            self._require_current_subscription_mutation(
+                identity,
+                mutation_token,
+            )
 
         if existing is not None and not existing_is_live:
-            self.db.deactivate_subscription(existing.id, now_text)
+            await self.db.run_async(
+                self.db.deactivate_subscription,
+                existing.id,
+                now_text,
+            )
+            self._require_current_subscription_mutation(
+                identity,
+                mutation_token,
+            )
 
         previous_secret: str | None = None
         previous_secret_expires_at: str | None = None
@@ -474,10 +506,15 @@ class McpApi:
             active=True,
             created_at=created_at,
         )
-        self.db.activate_subscription(
+        await self.db.run_async(
+            self.db.activate_subscription,
             subscription,
             now=now_text,
             backfill_existing=not existing_is_live,
+        )
+        self._require_current_subscription_mutation(
+            identity,
+            mutation_token,
         )
 
         return {
@@ -487,7 +524,7 @@ class McpApi:
             "truncated": False,
         }
 
-    def _events_unsubscribe(
+    async def _events_unsubscribe(
         self,
         params: dict[str, Any],
     ) -> dict[str, Any]:
@@ -517,8 +554,10 @@ class McpApi:
             canonical_json(arguments),
         )
         self._next_subscription_mutation(identity)
-        self.db.deactivate_subscription(
-            identity, isoformat_z(utc_now())
+        await self.db.run_async(
+            self.db.deactivate_subscription,
+            identity,
+            isoformat_z(utc_now()),
         )
         return {}
 
@@ -579,7 +618,7 @@ class McpApi:
             ]
         }
 
-    def _tools_call(
+    async def _tools_call(
         self,
         params: dict[str, Any],
     ) -> dict[str, Any]:
@@ -591,7 +630,7 @@ class McpApi:
             raise RpcError(
                 -32602, "events_status accepts no arguments"
             )
-        status = self.service.status()
+        status = await self._service_status()
         return {
             "content": [
                 {

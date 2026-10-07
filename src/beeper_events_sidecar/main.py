@@ -5,6 +5,7 @@ import json
 import logging
 import signal
 from datetime import UTC, datetime
+from typing import Any, cast
 
 import aiohttp
 from aiohttp import web
@@ -44,7 +45,7 @@ async def run() -> None:
     configure_logging(settings.log_level)
     logger = logging.getLogger(__name__)
 
-    timeout = aiohttp.ClientTimeout(total=30)
+    timeout = cast(Any, aiohttp.ClientTimeout)(total=30)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         db = Database(settings.db_path)
         beeper = BeeperClient(settings, session)

@@ -1,4 +1,6 @@
+import asyncio
 import sqlite3
+import threading
 from dataclasses import replace
 from datetime import timedelta
 
@@ -45,6 +47,40 @@ def _event(timestamp: str, message_id: str = "m1") -> SourceEvent:
         sender_name="Alice",
         discovered_via="test",
     )
+
+
+@pytest.mark.asyncio
+async def test_async_db_calls_do_not_block_loop_and_are_serialized(tmp_path):
+    db = Database(tmp_path / "state.sqlite3")
+    db.initialize()
+    active = 0
+    max_active = 0
+    state_lock = threading.Lock()
+    first_started = threading.Event()
+    second_started = threading.Event()
+    release = threading.Event()
+
+    def blocking_work(started: threading.Event) -> None:
+        nonlocal active, max_active
+        with state_lock:
+            active += 1
+            max_active = max(max_active, active)
+        started.set()
+        release.wait(timeout=1.0)
+        with state_lock:
+            active -= 1
+
+    first = asyncio.create_task(db.run_async(blocking_work, first_started))
+    await asyncio.wait_for(asyncio.to_thread(first_started.wait), timeout=1.0)
+
+    second = asyncio.create_task(db.run_async(blocking_work, second_started))
+    heartbeat = asyncio.create_task(asyncio.sleep(0.02))
+    await asyncio.wait_for(heartbeat, timeout=0.2)
+
+    assert not second_started.is_set()
+    release.set()
+    await asyncio.wait_for(asyncio.gather(first, second), timeout=1.0)
+    assert max_active == 1
 
 
 def test_database_context_closes_connections(tmp_path, monkeypatch):

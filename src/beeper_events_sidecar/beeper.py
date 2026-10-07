@@ -5,7 +5,7 @@ import ipaddress
 import json
 import logging
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlsplit, urlunsplit
 
 import aiohttp
@@ -60,7 +60,7 @@ class BeeperClient:
             url,
             params=params,
             headers=headers,
-            timeout=aiohttp.ClientTimeout(total=15),
+            timeout=cast(Any, aiohttp.ClientTimeout)(total=15),
         ) as response:
             body = await response.text()
             if response.status < 200 or response.status >= 300:
@@ -247,7 +247,7 @@ class BeeperClient:
             headers=self._headers(),
             heartbeat=30,
             autoping=True,
-            timeout=aiohttp.ClientWSTimeout(
+            timeout=cast(Any, aiohttp.ClientWSTimeout)(
                 ws_receive=None,
                 ws_close=10,
             ),

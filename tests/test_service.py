@@ -270,6 +270,29 @@ class BlockingSender(StatusSender):
         return self.status
 
 
+class ConcurrentBlockingSender(StatusSender):
+    def __init__(self, status: int, target_started: int):
+        super().__init__(status)
+        self.target_started = target_started
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.active = 0
+        self.max_active = 0
+
+    async def send_event(self, **kwargs):
+        self.event_ids.append(kwargs["event"]["eventId"])
+        self.calls.append(kwargs)
+        self.active += 1
+        self.max_active = max(self.max_active, self.active)
+        if len(self.event_ids) >= self.target_started:
+            self.started.set()
+        try:
+            await self.release.wait()
+            return self.status
+        finally:
+            self.active -= 1
+
+
 def _delivery_fixture(tmp_path, sender):
     import base64
 
@@ -391,6 +414,50 @@ async def test_transient_delivery_failure_retries_same_event_id(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_delivery_batch_runs_with_bounded_concurrency(tmp_path):
+    from dataclasses import replace
+
+    sender = ConcurrentBlockingSender(204, target_started=2)
+    db, service, first_delivery, now_text = _delivery_fixture(tmp_path, sender)
+    service.settings = replace(service.settings, delivery_concurrency=2)
+
+    from beeper_events_sidecar.models import SourceEvent
+
+    for suffix in ("two", "three"):
+        event = SourceEvent(
+            source_key=f"beeper:whatsapp:chat:message-{suffix}",
+            source_event_id=f"src-delivery-{suffix}",
+            name="message.created",
+            occurred_at=now_text,
+            account_id="whatsapp",
+            chat_id="chat",
+            local_chat_id=None,
+            network="WhatsApp",
+            message_id=f"message-{suffix}",
+            sender_id="sender",
+            sender_name="Alice",
+            discovered_via="test",
+        )
+        assert db.record_event_and_enqueue(event, now=now_text)
+
+    deliveries = db.get_due_deliveries(now_text, limit=20)
+    assert len(deliveries) == 3
+    assert first_delivery.event_id in {item.event_id for item in deliveries}
+
+    task = asyncio.create_task(service._deliver_batch(deliveries))
+    await asyncio.wait_for(sender.started.wait(), timeout=1.0)
+    await asyncio.sleep(0.02)
+
+    assert len(sender.event_ids) == 2
+    assert sender.max_active == 2
+
+    sender.release.set()
+    await asyncio.wait_for(task, timeout=1.0)
+    assert len(sender.event_ids) == 3
+    assert sender.max_active == 2
+
+
+@pytest.mark.asyncio
 async def test_unsubscribe_resubscribe_does_not_resurrect_inflight_retry(
     tmp_path,
 ):
@@ -401,7 +468,7 @@ async def test_unsubscribe_resubscribe_does_not_resurrect_inflight_retry(
 
     task = asyncio.create_task(service._deliver(delivery))
     await asyncio.wait_for(sender.started.wait(), timeout=1.0)
-    api._events_unsubscribe(
+    await api._events_unsubscribe(
         {
             "name": "message.created",
             "arguments": {},
@@ -427,7 +494,7 @@ async def test_stale_delivery_snapshot_is_not_sent_after_resubscribe(tmp_path):
         await _mcp_delivery_fixture(tmp_path, sender, message_id="m-stale")
     )
 
-    api._events_unsubscribe(
+    await api._events_unsubscribe(
         {
             "name": "message.created",
             "arguments": {},
