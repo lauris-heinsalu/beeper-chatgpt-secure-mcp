@@ -7,6 +7,7 @@ import pytest
 from beeper_events_sidecar.config import Settings
 from beeper_events_sidecar.db import Database
 from beeper_events_sidecar.mcp import McpApi, RpcError
+from beeper_events_sidecar.models import isoformat_z, utc_now
 
 
 class FakeService:
@@ -220,6 +221,160 @@ async def test_event_seen_during_initial_verification_is_backfilled(tmp_path):
     await asyncio.wait_for(subscribe_task, timeout=1.0)
 
     assert db.stats(isoformat_z(utc_now()))["pending_deliveries"] == 1
+
+
+@pytest.mark.asyncio
+async def test_subscription_rejects_falsey_non_object_arguments(tmp_path):
+    settings = _settings(tmp_path)
+    db = Database(settings.db_path)
+    db.initialize()
+    api = McpApi(
+        settings=settings,
+        db=db,
+        service=FakeService(),
+        webhook_sender=FakeSender(),
+    )
+    base = {
+        "name": "message.created",
+        "delivery": {
+            "mode": "webhook",
+            "url": "https://example.com/callback",
+            "secret": _secret(b"a"),
+        },
+        "cursor": None,
+    }
+
+    for invalid in ([], "", False):
+        with pytest.raises(RpcError, match="arguments must be an object"):
+            await api._events_subscribe({**base, "arguments": invalid})
+
+    assert db.stats(isoformat_z(utc_now()))["active_subscriptions"] == 0
+
+
+@pytest.mark.asyncio
+async def test_subscription_filter_order_has_one_canonical_identity(tmp_path):
+    settings = _settings(tmp_path)
+    db = Database(settings.db_path)
+    db.initialize()
+    sender = FakeSender()
+    api = McpApi(
+        settings=settings,
+        db=db,
+        service=FakeService(),
+        webhook_sender=sender,
+    )
+    base = {
+        "name": "message.created",
+        "delivery": {
+            "mode": "webhook",
+            "url": "https://example.com/callback",
+            "secret": _secret(b"a"),
+        },
+        "cursor": None,
+    }
+    first = await api._events_subscribe(
+        {
+            **base,
+            "arguments": {
+                "account_ids": ["whatsapp", "messenger"],
+                "sender_ids": ["b", "a"],
+            },
+        }
+    )
+    second = await api._events_subscribe(
+        {
+            **base,
+            "arguments": {
+                "sender_ids": ["a", "b"],
+                "account_ids": ["messenger", "whatsapp"],
+            },
+        }
+    )
+
+    assert second["id"] == first["id"]
+    stored = db.get_subscription(first["id"])
+    assert stored is not None
+    assert stored.arguments == {
+        "account_ids": ["messenger", "whatsapp"],
+        "sender_ids": ["a", "b"],
+    }
+    assert db.stats(isoformat_z(utc_now()))["active_subscriptions"] == 1
+
+    api._events_unsubscribe(
+        {
+            "name": "message.created",
+            "arguments": {
+                "account_ids": ["whatsapp", "messenger"],
+                "sender_ids": ["b", "a"],
+            },
+            "delivery": {
+                "mode": "webhook",
+                "url": "https://example.com/callback",
+            },
+        }
+    )
+    assert db.stats(isoformat_z(utc_now()))["active_subscriptions"] == 0
+
+
+def test_unsubscribe_unknown_event_remains_idempotent_with_bad_arguments(
+    tmp_path,
+):
+    settings = _settings(tmp_path)
+    db = Database(settings.db_path)
+    db.initialize()
+    api = McpApi(
+        settings=settings,
+        db=db,
+        service=FakeService(),
+        webhook_sender=FakeSender(),
+    )
+
+    assert api._events_unsubscribe(
+        {
+            "name": "unknown.event",
+            "arguments": [],
+            "delivery": {},
+        }
+    ) == {}
+
+
+@pytest.mark.asyncio
+async def test_empty_filter_lists_canonicalize_to_no_filter(tmp_path):
+    settings = _settings(tmp_path)
+    db = Database(settings.db_path)
+    db.initialize()
+    api = McpApi(
+        settings=settings,
+        db=db,
+        service=FakeService(),
+        webhook_sender=FakeSender(),
+    )
+    base = {
+        "name": "message.created",
+        "delivery": {
+            "mode": "webhook",
+            "url": "https://example.com/callback",
+            "secret": _secret(b"a"),
+        },
+        "cursor": None,
+    }
+
+    broad = await api._events_subscribe({**base, "arguments": {}})
+    empty = await api._events_subscribe(
+        {
+            **base,
+            "arguments": {
+                "account_ids": [],
+                "chat_ids": [],
+                "sender_ids": [],
+            },
+        }
+    )
+
+    assert empty["id"] == broad["id"]
+    stored = db.get_subscription(broad["id"])
+    assert stored is not None
+    assert stored.arguments == {}
 
 
 def test_discover_advertises_only_events_and_status_tool(tmp_path):

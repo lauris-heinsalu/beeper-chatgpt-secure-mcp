@@ -321,12 +321,12 @@ class McpApi:
         params: dict[str, Any],
     ) -> dict[str, Any]:
         name = params.get("name")
-        arguments = params.get("arguments") or {}
+        raw_arguments = params.get("arguments")
         delivery = params.get("delivery") or {}
 
         if name != _EVENT_NAME:
             raise RpcError(-32602, f"Unsupported event: {name!r}")
-        self._validate_arguments(arguments)
+        arguments = self._canonicalize_arguments(raw_arguments)
         if params.get("cursor") is not None:
             raise RpcError(
                 -32602,
@@ -492,12 +492,12 @@ class McpApi:
         params: dict[str, Any],
     ) -> dict[str, Any]:
         name = params.get("name")
-        arguments = params.get("arguments") or {}
+        raw_arguments = params.get("arguments")
         delivery = params.get("delivery") or {}
         if name != _EVENT_NAME:
             # Unsubscribe is deliberately idempotent.
             return {}
-        self._validate_arguments(arguments)
+        arguments = self._canonicalize_arguments(raw_arguments)
 
         if not isinstance(delivery, dict):
             raise RpcError(-32602, "delivery must be an object")
@@ -523,7 +523,9 @@ class McpApi:
         return {}
 
     @staticmethod
-    def _validate_arguments(arguments: Any) -> None:
+    def _canonicalize_arguments(arguments: Any) -> dict[str, list[str]]:
+        if arguments is None:
+            return {}
         if not isinstance(arguments, dict):
             raise RpcError(-32602, "arguments must be an object")
         allowed = {"account_ids", "chat_ids", "sender_ids"}
@@ -533,6 +535,8 @@ class McpApi:
                 -32602,
                 f"Unknown event arguments: {sorted(unknown)!r}",
             )
+
+        canonical: dict[str, list[str]] = {}
         for key, value in arguments.items():
             if not isinstance(value, list) or not all(
                 isinstance(item, str) and item for item in value
@@ -545,6 +549,9 @@ class McpApi:
                 raise RpcError(
                     -32602, f"{key} must not contain duplicates"
                 )
+            if value:
+                canonical[key] = sorted(value)
+        return canonical
 
     @staticmethod
     def _tools_list() -> dict[str, Any]:
