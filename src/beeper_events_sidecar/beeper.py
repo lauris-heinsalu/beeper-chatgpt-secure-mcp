@@ -18,6 +18,10 @@ class BeeperError(RuntimeError):
     pass
 
 
+class ReconciliationWindowTooLarge(BeeperError):
+    pass
+
+
 class BeeperClient:
     def __init__(
         self,
@@ -122,7 +126,7 @@ class BeeperClient:
             )
             page_count += 1
             if page_count > 1000:
-                raise BeeperError(
+                raise ReconciliationWindowTooLarge(
                     "Message reconciliation exceeded 1000 pages"
                 )
 

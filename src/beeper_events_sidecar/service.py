@@ -4,12 +4,16 @@ import asyncio
 import logging
 import secrets
 import sqlite3
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 import aiohttp
 
-from .beeper import BeeperClient, BeeperError
+from .beeper import (
+    BeeperClient,
+    BeeperError,
+    ReconciliationWindowTooLarge,
+)
 from .config import Settings
 from .db import Database
 from .models import (
@@ -325,6 +329,59 @@ class EventService:
             except Exception:
                 logger.exception("Beeper reconciliation failed")
 
+    async def _reconcile_window(
+        self,
+        lower_bound: datetime,
+        upper_bound: datetime,
+        *,
+        now_text: str,
+    ) -> tuple[int, int]:
+        try:
+            messages = await self.beeper.search_messages(
+                date_after=isoformat_z(lower_bound),
+                date_before=isoformat_z(upper_bound),
+            )
+        except ReconciliationWindowTooLarge:
+            window = upper_bound - lower_bound
+            if window <= timedelta(seconds=1):
+                raise
+            midpoint = lower_bound + window / 2
+            logger.warning(
+                "Splitting oversized reconciliation window: %s to %s",
+                isoformat_z(lower_bound),
+                isoformat_z(upper_bound),
+            )
+            older_scanned, older_inserted = await self._reconcile_window(
+                lower_bound,
+                midpoint,
+                now_text=now_text,
+            )
+            newer_scanned, newer_inserted = await self._reconcile_window(
+                max(lower_bound, midpoint - timedelta(seconds=1)),
+                upper_bound,
+                now_text=now_text,
+            )
+            return (
+                older_scanned + newer_scanned,
+                older_inserted + newer_inserted,
+            )
+
+        inserted_count = 0
+        for message in messages:
+            normalized = await self._normalize_message(
+                message,
+                discovered_via="reconciliation",
+            )
+            if normalized is None:
+                continue
+            if self.db.record_event_and_enqueue(
+                normalized,
+                now=now_text,
+                deliverable=True,
+            ):
+                inserted_count += 1
+        return len(messages), inserted_count
+
     async def reconcile_once(self) -> None:
         async with self._reconcile_lock:
             checkpoint = self.db.get_checkpoint(_CHECKPOINT_NAME)
@@ -341,36 +398,22 @@ class EventService:
             lower_bound = parse_timestamp(checkpoint) - timedelta(
                 seconds=self.settings.reconcile_overlap_seconds
             )
-            messages = await self.beeper.search_messages(
-                date_after=isoformat_z(lower_bound),
-                date_before=now_text,
+            scanned_count, inserted_count = await self._reconcile_window(
+                lower_bound,
+                upper_bound,
+                now_text=now_text,
             )
 
-            inserted_count = 0
-            for message in messages:
-                normalized = await self._normalize_message(
-                    message,
-                    discovered_via="reconciliation",
-                )
-                if normalized is None:
-                    continue
-                if self.db.record_event_and_enqueue(
-                    normalized,
-                    now=now_text,
-                    deliverable=True,
-                ):
-                    inserted_count += 1
-
-            # Advance only after a complete successful scan. upper_bound was
-            # captured before the query, so messages arriving during the scan
-            # remain eligible for the next reconciliation window.
+            # Advance only after every split window completes successfully.
+            # upper_bound was captured before scanning, so messages arriving
+            # during reconciliation remain eligible for the next overlap.
             self.db.set_checkpoint(
                 _CHECKPOINT_NAME, now_text, now_text
             )
             self.last_reconcile_at = now_text
             logger.info(
                 "Reconciliation complete: scanned=%d inserted=%d",
-                len(messages),
+                scanned_count,
                 inserted_count,
             )
 

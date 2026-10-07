@@ -1,15 +1,18 @@
 import asyncio
 import sqlite3
+from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 
 import pytest
 
+from beeper_events_sidecar.beeper import ReconciliationWindowTooLarge
 from beeper_events_sidecar.config import Settings
 from beeper_events_sidecar.db import Database
 from beeper_events_sidecar.models import (
     Subscription,
     isoformat_z,
+    parse_timestamp,
     utc_now,
 )
 from beeper_events_sidecar.service import EventService
@@ -32,6 +35,25 @@ class FakeBeeper:
             "localChatID": "84",
             "network": "WhatsApp",
         }
+
+
+class WindowLimitedBeeper(FakeBeeper):
+    def __init__(self, messages, *, max_window_seconds):
+        super().__init__(messages)
+        self.max_window_seconds = max_window_seconds
+        self.calls = []
+
+    async def search_messages(self, *, date_after, date_before):
+        lower = parse_timestamp(date_after)
+        upper = parse_timestamp(date_before)
+        self.calls.append((lower, upper))
+        if (upper - lower).total_seconds() > self.max_window_seconds:
+            raise ReconciliationWindowTooLarge("window too large")
+        return [
+            message
+            for message in self.messages
+            if lower < parse_timestamp(message["timestamp"]) < upper
+        ]
 
 
 class UnusedSender:
@@ -114,6 +136,78 @@ async def test_reconciliation_recovers_missed_message_once(tmp_path):
     second = db.stats(isoformat_z(utc_now()))
     assert second["source_events_seen"] == 1
     assert second["pending_deliveries"] == 1
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_splits_oversized_window_and_advances_checkpoint(
+    tmp_path,
+):
+    now = utc_now()
+    settings = replace(_settings(tmp_path), reconcile_overlap_seconds=0)
+    db = Database(settings.db_path)
+    db.initialize()
+
+    subscription_created = isoformat_z(now - timedelta(minutes=20))
+    subscription = Subscription(
+        id="sub-split",
+        principal="test",
+        name="message.created",
+        arguments={},
+        callback_url="https://example.com/callback",
+        secret="whsec_" + "eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHg=",
+        previous_secret=None,
+        previous_secret_expires_at=None,
+        expires_at=None,
+        active=True,
+        created_at=subscription_created,
+    )
+    db.upsert_subscription(subscription, now=subscription_created)
+
+    checkpoint = isoformat_z(now - timedelta(minutes=10))
+    db.set_checkpoint("beeper_messages", checkpoint, checkpoint)
+    messages = [
+        {
+            "id": f"m-{minutes}",
+            "accountID": "whatsapp",
+            "chatID": "chat-a",
+            "senderID": "sender-a",
+            "senderName": "Alice",
+            "timestamp": isoformat_z(now - timedelta(minutes=minutes)),
+            "isSender": False,
+            "isDeleted": False,
+        }
+        for minutes in (8, 4, 1)
+    ]
+    beeper = WindowLimitedBeeper(messages, max_window_seconds=180)
+    service = EventService(
+        settings=settings,
+        db=db,
+        beeper=beeper,
+        webhook_sender=UnusedSender(),
+    )
+
+    await service.reconcile_once()
+
+    stats = db.stats(isoformat_z(utc_now()))
+    assert stats["source_events_seen"] == 3
+    assert stats["pending_deliveries"] == 3
+    advanced = db.get_checkpoint("beeper_messages")
+    assert advanced is not None
+    assert parse_timestamp(advanced) > parse_timestamp(checkpoint)
+    assert len(beeper.calls) > 1
+    assert any(
+        (upper - lower).total_seconds() > beeper.max_window_seconds
+        for lower, upper in beeper.calls
+    )
+    assert any(
+        (upper - lower).total_seconds() <= beeper.max_window_seconds
+        for lower, upper in beeper.calls
+    )
+
+    await service.reconcile_once()
+    second = db.stats(isoformat_z(utc_now()))
+    assert second["source_events_seen"] == 3
+    assert second["pending_deliveries"] == 3
 
 
 @pytest.mark.asyncio
