@@ -175,6 +175,50 @@ class Database:
             ).fetchone()
         return None if row is None else self._subscription_from_row(row)
 
+    def _upsert_subscription(
+        self,
+        conn: sqlite3.Connection,
+        subscription: Subscription,
+        *,
+        now: str,
+    ) -> None:
+        conn.execute(
+            """
+            INSERT INTO subscriptions(
+                id, principal, name, arguments_json, callback_url,
+                secret, previous_secret, previous_secret_expires_at,
+                expires_at, active, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                principal = excluded.principal,
+                name = excluded.name,
+                arguments_json = excluded.arguments_json,
+                callback_url = excluded.callback_url,
+                secret = excluded.secret,
+                previous_secret = excluded.previous_secret,
+                previous_secret_expires_at =
+                    excluded.previous_secret_expires_at,
+                expires_at = excluded.expires_at,
+                active = 1,
+                created_at = excluded.created_at,
+                updated_at = excluded.updated_at
+            """,
+            (
+                subscription.id,
+                subscription.principal,
+                subscription.name,
+                canonical_json(subscription.arguments),
+                subscription.callback_url,
+                subscription.secret,
+                subscription.previous_secret,
+                subscription.previous_secret_expires_at,
+                subscription.expires_at,
+                subscription.created_at,
+                now,
+            ),
+        )
+
     def upsert_subscription(
         self,
         subscription: Subscription,
@@ -182,42 +226,7 @@ class Database:
         now: str,
     ) -> None:
         with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO subscriptions(
-                    id, principal, name, arguments_json, callback_url,
-                    secret, previous_secret, previous_secret_expires_at,
-                    expires_at, active, created_at, updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    principal = excluded.principal,
-                    name = excluded.name,
-                    arguments_json = excluded.arguments_json,
-                    callback_url = excluded.callback_url,
-                    secret = excluded.secret,
-                    previous_secret = excluded.previous_secret,
-                    previous_secret_expires_at =
-                        excluded.previous_secret_expires_at,
-                    expires_at = excluded.expires_at,
-                    active = 1,
-                    created_at = excluded.created_at,
-                    updated_at = excluded.updated_at
-                """,
-                (
-                    subscription.id,
-                    subscription.principal,
-                    subscription.name,
-                    canonical_json(subscription.arguments),
-                    subscription.callback_url,
-                    subscription.secret,
-                    subscription.previous_secret,
-                    subscription.previous_secret_expires_at,
-                    subscription.expires_at,
-                    subscription.created_at,
-                    now,
-                ),
-            )
+            self._upsert_subscription(conn, subscription, now=now)
 
     def deactivate_subscription(self, subscription_id: str, now: str) -> None:
         with self._connect() as conn:
@@ -393,6 +402,65 @@ class Database:
                     ),
                 )
             return inserted
+
+    def _enqueue_existing_events_for_subscription(
+        self,
+        conn: sqlite3.Connection,
+        subscription: Subscription,
+        *,
+        now: str,
+    ) -> int:
+        inserted_count = 0
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM source_events
+            WHERE occurred_at >= ?
+            ORDER BY occurred_at, source_key
+            """,
+            (subscription.created_at,),
+        ).fetchall()
+        for row in rows:
+            event = self._event_from_row(row)
+            if not subscription.matches(event):
+                continue
+            event_id = stable_id(
+                "evt_", subscription.id, event.source_key
+            )
+            cursor = conn.execute(
+                """
+                INSERT OR IGNORE INTO deliveries(
+                    subscription_id, source_key, event_id, status,
+                    attempt_count, next_attempt_at
+                )
+                VALUES (?, ?, ?, 'pending', 0, ?)
+                """,
+                (
+                    subscription.id,
+                    event.source_key,
+                    event_id,
+                    now,
+                ),
+            )
+            inserted_count += cursor.rowcount
+        return inserted_count
+
+    def activate_subscription(
+        self,
+        subscription: Subscription,
+        *,
+        now: str,
+        backfill_existing: bool,
+    ) -> int:
+        with self._connect() as conn:
+            self._upsert_subscription(conn, subscription, now=now)
+            if not backfill_existing:
+                return 0
+            return self._enqueue_existing_events_for_subscription(
+                conn,
+                subscription,
+                now=now,
+            )
 
     def get_due_deliveries(
         self, now: str, limit: int = 20

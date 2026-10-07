@@ -68,6 +68,34 @@ def test_database_context_closes_connections(tmp_path, monkeypatch):
             conn.execute("SELECT 1")
 
 
+def test_subscription_activation_rolls_back_if_backfill_fails(
+    tmp_path,
+    monkeypatch,
+):
+    db = Database(tmp_path / "state.sqlite3")
+    db.initialize()
+    now_text = isoformat_z(utc_now())
+    subscription = _subscription(now_text)
+
+    def fail_backfill(*_args, **_kwargs):
+        raise RuntimeError("backfill failed")
+
+    monkeypatch.setattr(
+        db,
+        "_enqueue_existing_events_for_subscription",
+        fail_backfill,
+    )
+
+    with pytest.raises(RuntimeError, match="backfill failed"):
+        db.activate_subscription(
+            subscription,
+            now=now_text,
+            backfill_existing=True,
+        )
+
+    assert db.get_subscription(subscription.id) is None
+
+
 def test_event_insert_is_idempotent_and_enqueues_once(tmp_path):
     db = Database(tmp_path / "state.sqlite3")
     db.initialize()

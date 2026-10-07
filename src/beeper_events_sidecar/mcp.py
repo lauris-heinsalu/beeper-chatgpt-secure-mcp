@@ -54,6 +54,23 @@ class McpApi:
         self.db = db
         self.service = service
         self.webhook_sender = webhook_sender
+        self._subscription_mutations: dict[str, int] = {}
+
+    def _next_subscription_mutation(self, subscription_id: str) -> int:
+        token = self._subscription_mutations.get(subscription_id, 0) + 1
+        self._subscription_mutations[subscription_id] = token
+        return token
+
+    def _require_current_subscription_mutation(
+        self,
+        subscription_id: str,
+        token: int,
+    ) -> None:
+        if self._subscription_mutations.get(subscription_id) != token:
+            raise RpcError(
+                -32016,
+                "Subscription request was superseded by a newer mutation",
+            )
 
     def application(self) -> web.Application:
         app = web.Application(
@@ -342,6 +359,7 @@ class McpApi:
             name,
             canonical_json(arguments),
         )
+        mutation_token = self._next_subscription_mutation(identity)
         existing = self.db.get_subscription(identity)
 
         now = utc_now()
@@ -371,6 +389,10 @@ class McpApi:
                     "CallbackEndpointError",
                     data={"reason": exc.reason},
                 ) from exc
+            self._require_current_subscription_mutation(
+                identity,
+                mutation_token,
+            )
             self.db.mark_callback_verified(
                 _PRINCIPAL,
                 callback_url,
@@ -452,7 +474,11 @@ class McpApi:
             active=True,
             created_at=created_at,
         )
-        self.db.upsert_subscription(subscription, now=now_text)
+        self.db.activate_subscription(
+            subscription,
+            now=now_text,
+            backfill_existing=not existing_is_live,
+        )
 
         return {
             "id": identity,
@@ -490,6 +516,7 @@ class McpApi:
             name,
             canonical_json(arguments),
         )
+        self._next_subscription_mutation(identity)
         self.db.deactivate_subscription(
             identity, isoformat_z(utc_now())
         )

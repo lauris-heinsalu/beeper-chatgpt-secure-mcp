@@ -1,3 +1,4 @@
+import asyncio
 import base64
 from pathlib import Path
 
@@ -5,7 +6,7 @@ import pytest
 
 from beeper_events_sidecar.config import Settings
 from beeper_events_sidecar.db import Database
-from beeper_events_sidecar.mcp import McpApi
+from beeper_events_sidecar.mcp import McpApi, RpcError
 
 
 class FakeService:
@@ -28,6 +29,18 @@ class FakeSender:
 
     async def verify_callback(self, url, secret, subscription_id):
         self.verified.append((url, secret, subscription_id))
+
+
+class BlockingVerifySender(FakeSender):
+    def __init__(self):
+        super().__init__()
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def verify_callback(self, url, secret, subscription_id):
+        self.verified.append((url, secret, subscription_id))
+        self.started.set()
+        await self.release.wait()
 
 
 def _settings(tmp_path: Path) -> Settings:
@@ -103,6 +116,110 @@ async def test_subscription_is_persistent_idempotent_and_rotates_secret(
     assert stored.secret == _secret(b"b")
     assert stored.previous_secret == _secret(b"a")
     assert stored.previous_secret_expires_at is not None
+
+
+@pytest.mark.asyncio
+async def test_unsubscribe_during_verification_prevents_stale_reactivation(
+    tmp_path,
+):
+    from beeper_events_sidecar.models import isoformat_z, utc_now
+
+    settings = _settings(tmp_path)
+    db = Database(settings.db_path)
+    db.initialize()
+    sender = BlockingVerifySender()
+    api = McpApi(
+        settings=settings,
+        db=db,
+        service=FakeService(),
+        webhook_sender=sender,
+    )
+    params = {
+        "name": "message.created",
+        "arguments": {},
+        "delivery": {
+            "mode": "webhook",
+            "url": "https://example.com/callback",
+            "secret": _secret(b"a"),
+        },
+        "cursor": None,
+    }
+
+    subscribe_task = asyncio.create_task(api._events_subscribe(params))
+    await asyncio.wait_for(sender.started.wait(), timeout=1.0)
+    api._events_unsubscribe(
+        {
+            "name": "message.created",
+            "arguments": {},
+            "delivery": {
+                "mode": "webhook",
+                "url": "https://example.com/callback",
+            },
+        }
+    )
+    sender.release.set()
+
+    with pytest.raises(RpcError, match="superseded"):
+        await asyncio.wait_for(subscribe_task, timeout=1.0)
+
+    assert db.stats(isoformat_z(utc_now()))["active_subscriptions"] == 0
+
+
+@pytest.mark.asyncio
+async def test_event_seen_during_initial_verification_is_backfilled(tmp_path):
+    from datetime import timedelta
+
+    from beeper_events_sidecar.models import SourceEvent, isoformat_z, utc_now
+
+    settings = _settings(tmp_path)
+    db = Database(settings.db_path)
+    db.initialize()
+    sender = BlockingVerifySender()
+    api = McpApi(
+        settings=settings,
+        db=db,
+        service=FakeService(),
+        webhook_sender=sender,
+    )
+    params = {
+        "name": "message.created",
+        "arguments": {"sender_ids": ["sender"]},
+        "delivery": {
+            "mode": "webhook",
+            "url": "https://example.com/callback",
+            "secret": _secret(b"a"),
+        },
+        "cursor": None,
+    }
+
+    subscribe_task = asyncio.create_task(api._events_subscribe(params))
+    await asyncio.wait_for(sender.started.wait(), timeout=1.0)
+
+    event_time = utc_now()
+    event = SourceEvent(
+        source_key="beeper:a:c:m-during-verify",
+        source_event_id="src_during_verify",
+        name="message.created",
+        occurred_at=isoformat_z(event_time),
+        account_id="a",
+        chat_id="c",
+        local_chat_id=None,
+        network="WhatsApp",
+        message_id="m-during-verify",
+        sender_id="sender",
+        sender_name="Alice",
+        discovered_via="test",
+    )
+    assert db.record_event_and_enqueue(
+        event,
+        now=isoformat_z(event_time + timedelta(milliseconds=1)),
+    )
+    assert db.stats(isoformat_z(utc_now()))["pending_deliveries"] == 0
+
+    sender.release.set()
+    await asyncio.wait_for(subscribe_task, timeout=1.0)
+
+    assert db.stats(isoformat_z(utc_now()))["pending_deliveries"] == 1
 
 
 def test_discover_advertises_only_events_and_status_tool(tmp_path):
