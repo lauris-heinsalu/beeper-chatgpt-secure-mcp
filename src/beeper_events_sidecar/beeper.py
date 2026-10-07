@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import logging
 from collections.abc import AsyncIterator
@@ -169,6 +170,67 @@ class BeeperClient:
             ),
         )
 
+    @staticmethod
+    def _is_loopback_host(hostname: str) -> bool:
+        if hostname.lower() == "localhost":
+            return True
+        try:
+            return ipaddress.ip_address(hostname).is_loopback
+        except ValueError:
+            return False
+
+    def _event_websocket_url(self, raw_url: str) -> str:
+        base = urlsplit(self.settings.beeper_base_url)
+        if base.scheme not in {"http", "https"} or not base.hostname:
+            raise BeeperError("Invalid configured Beeper base URL")
+        if base.username or base.password or base.fragment:
+            raise BeeperError("Invalid configured Beeper base URL")
+
+        parts = urlsplit(raw_url)
+        allowed_schemes = (
+            {"https", "wss"}
+            if base.scheme == "https"
+            else {"http", "ws"}
+        )
+        if parts.scheme not in allowed_schemes:
+            raise BeeperError(
+                "Beeper WebSocket endpoint uses an unsupported scheme"
+            )
+        if parts.username or parts.password:
+            raise BeeperError(
+                "Beeper WebSocket endpoint must not contain user information"
+            )
+        if not parts.hostname:
+            raise BeeperError("Beeper WebSocket endpoint is missing a hostname")
+        if parts.fragment:
+            raise BeeperError(
+                "Beeper WebSocket endpoint must not contain a fragment"
+            )
+
+        try:
+            base_port = base.port or (443 if base.scheme == "https" else 80)
+            endpoint_port = parts.port or (
+                443 if parts.scheme in {"https", "wss"} else 80
+            )
+        except ValueError as exc:
+            raise BeeperError("Beeper WebSocket endpoint has an invalid port") from exc
+
+        base_host = base.hostname.lower()
+        endpoint_host = parts.hostname.lower()
+        same_host = endpoint_host == base_host
+        loopback_aliases = self._is_loopback_host(
+            base_host
+        ) and self._is_loopback_host(endpoint_host)
+        if not (same_host or loopback_aliases) or endpoint_port != base_port:
+            raise BeeperError(
+                "Beeper WebSocket endpoint origin does not match Beeper base URL"
+            )
+
+        scheme = "wss" if parts.scheme in {"https", "wss"} else "ws"
+        return urlunsplit(
+            (scheme, parts.netloc, parts.path, parts.query, "")
+        )
+
     async def open_event_websocket(
         self,
     ) -> aiohttp.ClientWebSocketResponse:
@@ -178,11 +240,7 @@ class BeeperClient:
         if not isinstance(raw_url, str):
             raw_url = f"{self.settings.beeper_base_url}/v1/ws"
 
-        parts = urlsplit(raw_url)
-        scheme = "wss" if parts.scheme == "https" else "ws"
-        ws_url = urlunsplit(
-            (scheme, parts.netloc, parts.path, parts.query, "")
-        )
+        ws_url = self._event_websocket_url(raw_url)
 
         ws = await self.session.ws_connect(
             ws_url,
