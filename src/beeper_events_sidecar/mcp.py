@@ -103,11 +103,19 @@ class McpApi:
 
     async def health(self, _request: web.Request) -> web.Response:
         try:
-            self.db.stats(isoformat_z(utc_now()))
+            status = self.service.status()
         except Exception:
             logger.exception("Health check failed")
             return web.json_response(
                 {"status": "unhealthy"},
+                status=503,
+            )
+        if not status.get("workers_healthy", False):
+            return web.json_response(
+                {
+                    "status": "unhealthy",
+                    "workers": status.get("workers", {}),
+                },
                 status=503,
             )
         return web.json_response({"status": "ok"})
@@ -122,6 +130,15 @@ class McpApi:
             logger.exception("Readiness check failed")
             return web.json_response(
                 {"status": "not_ready"},
+                status=503,
+            )
+        if not status.get("workers_healthy", False):
+            return web.json_response(
+                {
+                    "status": "not_ready",
+                    "source_connected": status["source_connected"],
+                    "workers": status.get("workers", {}),
+                },
                 status=503,
             )
         return web.json_response(

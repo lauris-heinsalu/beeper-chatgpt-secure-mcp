@@ -1,3 +1,5 @@
+import asyncio
+import sqlite3
 from datetime import timedelta
 from pathlib import Path
 
@@ -330,3 +332,37 @@ async def test_websocket_unknown_sender_direction_defers_to_reconcile(
 
     assert db.stats(now_text)["source_events_seen"] == 0
     assert service._reconcile_requested.is_set()
+
+
+@pytest.mark.asyncio
+async def test_delivery_loop_recovers_from_transient_sqlite_operational_error(
+    tmp_path,
+    monkeypatch,
+):
+    settings = _settings(tmp_path)
+    db = Database(settings.db_path)
+    db.initialize()
+    service = EventService(
+        settings=settings,
+        db=db,
+        beeper=FakeBeeper([]),
+        webhook_sender=UnusedSender(),
+    )
+
+    original_get_due_deliveries = db.get_due_deliveries
+    calls = 0
+
+    def flaky_get_due_deliveries(now, limit=20):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise sqlite3.OperationalError("database is locked")
+        service._stop.set()
+        return original_get_due_deliveries(now, limit=limit)
+
+    monkeypatch.setattr(db, "get_due_deliveries", flaky_get_due_deliveries)
+
+    task = asyncio.create_task(service._delivery_loop())
+    await asyncio.wait_for(task, timeout=2.5)
+
+    assert calls >= 2

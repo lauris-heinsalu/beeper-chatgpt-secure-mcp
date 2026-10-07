@@ -10,7 +10,16 @@ from beeper_events_sidecar.mcp import McpApi
 
 class FakeService:
     def status(self):
-        return {"source_connected": True}
+        return {"source_connected": True, "workers_healthy": True}
+
+
+class DeadWorkerService:
+    def status(self):
+        return {
+            "source_connected": True,
+            "workers_healthy": False,
+            "workers": {"webhook-delivery": "failed"},
+        }
 
 
 class FakeSender:
@@ -241,3 +250,28 @@ async def test_unsubscribe_cancels_pending_and_resubscribe_starts_fresh(
     )
     # Cancelled work from the old subscription lifecycle never reappears.
     assert db.stats(isoformat_z(utc_now()))["pending_deliveries"] == 0
+
+
+@pytest.mark.asyncio
+async def test_health_and_readiness_fail_when_worker_is_dead(tmp_path):
+    from aiohttp.test_utils import TestClient, TestServer
+
+    settings = _settings(tmp_path)
+    db = Database(settings.db_path)
+    db.initialize()
+    api = McpApi(
+        settings=settings,
+        db=db,
+        service=DeadWorkerService(),
+        webhook_sender=FakeSender(),
+    )
+
+    client = TestClient(TestServer(api.application()))
+    await client.start_server()
+    try:
+        health = await client.get("/healthz")
+        ready = await client.get("/readyz")
+        assert health.status == 503
+        assert ready.status == 503
+    finally:
+        await client.close()

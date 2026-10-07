@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import secrets
+import sqlite3
 from datetime import timedelta
 from typing import Any
 
@@ -375,22 +376,34 @@ class EventService:
 
     async def _delivery_loop(self) -> None:
         while not self._stop.is_set():
-            now = utc_now()
-            now_text = isoformat_z(now)
-            deliveries = self.db.get_due_deliveries(now_text, limit=20)
-            if not deliveries:
+            try:
+                now = utc_now()
+                now_text = isoformat_z(now)
+                deliveries = self.db.get_due_deliveries(now_text, limit=20)
+                if not deliveries:
+                    try:
+                        await asyncio.wait_for(
+                            self._stop.wait(), timeout=1.0
+                        )
+                    except TimeoutError:
+                        pass
+                    continue
+
+                for delivery in deliveries:
+                    if self._stop.is_set():
+                        return
+                    await self._deliver(delivery)
+            except asyncio.CancelledError:
+                raise
+            except sqlite3.OperationalError as exc:
+                logger.warning(
+                    "Transient SQLite error in webhook delivery worker: %s",
+                    exc,
+                )
                 try:
-                    await asyncio.wait_for(
-                        self._stop.wait(), timeout=1.0
-                    )
+                    await asyncio.wait_for(self._stop.wait(), timeout=1.0)
                 except TimeoutError:
                     pass
-                continue
-
-            for delivery in deliveries:
-                if self._stop.is_set():
-                    return
-                await self._deliver(delivery)
 
     async def _deliver(self, delivery: Any) -> None:
         event = {
@@ -490,12 +503,29 @@ class EventService:
 
     def status(self) -> dict[str, Any]:
         now = isoformat_z(utc_now())
+        workers = {
+            task.get_name(): (
+                "cancelled"
+                if task.cancelled()
+                else "failed"
+                if task.done() and task.exception() is not None
+                else "stopped"
+                if task.done()
+                else "running"
+            )
+            for task in self._tasks
+        }
+        workers_healthy = len(self._tasks) == 3 and all(
+            state == "running" for state in workers.values()
+        )
         return {
             "service": "beeper-events-sidecar",
             "source_connected": self.source_connected,
             "last_source_event_at": self.last_source_event_at,
             "last_reconcile_at": self.last_reconcile_at,
             "last_source_error": self.last_source_error,
+            "workers_healthy": workers_healthy,
+            "workers": workers,
             "checkpoint": self.db.get_checkpoint(_CHECKPOINT_NAME),
             **self.db.stats(now),
         }
