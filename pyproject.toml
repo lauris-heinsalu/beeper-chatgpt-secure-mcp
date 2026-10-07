@@ -11,7 +11,7 @@ requires-python = ">=3.12"
 license = "MIT"
 authors = [{ name = "Lauris Heinsalu" }]
 dependencies = [
-  "aiohttp>=3.10,<4",
+  "aiohttp>=3.11,<4",
   "standardwebhooks==1.1.0",
 ]
 
