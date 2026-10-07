@@ -321,11 +321,38 @@ class Database:
                     now,
                 ),
             )
-            if cursor.rowcount == 0:
-                return False
+            inserted = cursor.rowcount == 1
+            effective_event = event
+            if not inserted:
+                conn.execute(
+                    """
+                    UPDATE source_events
+                    SET local_chat_id = COALESCE(local_chat_id, ?),
+                        network = COALESCE(network, ?),
+                        sender_id = COALESCE(sender_id, ?),
+                        sender_name = COALESCE(sender_name, ?)
+                    WHERE source_key = ?
+                    """,
+                    (
+                        event.local_chat_id,
+                        event.network,
+                        event.sender_id,
+                        event.sender_name,
+                        event.source_key,
+                    ),
+                )
+                row = conn.execute(
+                    "SELECT * FROM source_events WHERE source_key = ?",
+                    (event.source_key,),
+                ).fetchone()
+                if row is None:
+                    raise RuntimeError(
+                        "Source event disappeared during duplicate enrichment"
+                    )
+                effective_event = self._event_from_row(row)
 
             if not deliverable:
-                return True
+                return inserted
 
             rows = conn.execute(
                 """
@@ -338,10 +365,10 @@ class Database:
             ).fetchall()
             for row in rows:
                 subscription = self._subscription_from_row(row)
-                if not subscription.matches(event):
+                if not subscription.matches(effective_event):
                     continue
                 event_id = stable_id(
-                    "evt_", subscription.id, event.source_key
+                    "evt_", subscription.id, effective_event.source_key
                 )
                 conn.execute(
                     """
@@ -353,12 +380,12 @@ class Database:
                     """,
                     (
                         subscription.id,
-                        event.source_key,
+                        effective_event.source_key,
                         event_id,
                         now,
                     ),
                 )
-            return True
+            return inserted
 
     def get_due_deliveries(
         self, now: str, limit: int = 20

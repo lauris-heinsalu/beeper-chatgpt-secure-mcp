@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import timedelta
 
 from beeper_events_sidecar.db import Database
@@ -60,6 +61,65 @@ def test_event_insert_is_idempotent_and_enqueues_once(tmp_path):
     stats = db.stats(isoformat_z(now + timedelta(seconds=4)))
     assert stats["source_events_seen"] == 1
     assert stats["pending_deliveries"] == 1
+
+
+def test_duplicate_event_enrichment_can_create_previously_missed_delivery(
+    tmp_path,
+):
+    db = Database(tmp_path / "state.sqlite3")
+    db.initialize()
+    now = utc_now()
+    now_text = isoformat_z(now)
+    subscription = replace(
+        _subscription(now_text),
+        id="sub_sender",
+        arguments={"sender_ids": ["sender"]},
+    )
+    db.upsert_subscription(subscription, now=now_text)
+
+    occurred_at = isoformat_z(now + timedelta(seconds=1))
+    incomplete = SourceEvent(
+        source_key="beeper:a:c:m-enriched",
+        source_event_id="src_m-enriched",
+        name="message.created",
+        occurred_at=occurred_at,
+        account_id="a",
+        chat_id="c",
+        local_chat_id=None,
+        network=None,
+        message_id="m-enriched",
+        sender_id=None,
+        sender_name=None,
+        discovered_via="websocket",
+    )
+    assert db.record_event_and_enqueue(
+        incomplete, now=isoformat_z(now + timedelta(seconds=2))
+    )
+    assert db.stats(isoformat_z(now + timedelta(seconds=2)))[
+        "pending_deliveries"
+    ] == 0
+
+    enriched = replace(
+        incomplete,
+        local_chat_id="42",
+        network="WhatsApp",
+        sender_id="sender",
+        sender_name="Alice",
+        discovered_via="reconciliation",
+    )
+    assert not db.record_event_and_enqueue(
+        enriched, now=isoformat_z(now + timedelta(seconds=3))
+    )
+
+    deliveries = db.get_due_deliveries(
+        isoformat_z(now + timedelta(seconds=4))
+    )
+    assert len(deliveries) == 1
+    recovered = deliveries[0].source_event
+    assert recovered.sender_id == "sender"
+    assert recovered.sender_name == "Alice"
+    assert recovered.local_chat_id == "42"
+    assert recovered.network == "WhatsApp"
 
 
 def test_pre_subscription_message_is_recorded_but_not_delivered(tmp_path):
