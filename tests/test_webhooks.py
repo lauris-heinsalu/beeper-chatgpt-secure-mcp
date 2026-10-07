@@ -1,6 +1,10 @@
+import asyncio
 import base64
+import socket
 
 import pytest
+from aiohttp import web
+from aiohttp.test_utils import TestServer
 
 from beeper_events_sidecar.webhooks import (
     CallbackEndpointError,
@@ -37,6 +41,86 @@ async def test_callback_requires_https():
     with pytest.raises(CallbackEndpointError) as exc:
         await client.resolve_public("http://example.com/callback")
     assert exc.value.reason == "invalid_url"
+
+
+@pytest.mark.asyncio
+async def test_callback_post_reads_split_response_to_eof():
+    first = b'{"challenge":"abc'
+    second = b'def"}'
+
+    async def handler(_request):
+        response = web.StreamResponse(status=200)
+        await response.prepare(_request)
+        await response.write(first)
+        await asyncio.sleep(0.05)
+        await response.write(second)
+        await response.write_eof()
+        return response
+
+    app = web.Application()
+    app.router.add_post("/callback", handler)
+    server = TestServer(app)
+    await server.start_server()
+    try:
+        from beeper_events_sidecar.webhooks import ResolvedCallback
+
+        port = server.port
+        target = ResolvedCallback(
+            url=f"http://127.0.0.1:{port}/callback",
+            hostname="127.0.0.1",
+            port=port,
+            addresses=((socket.AF_INET, "127.0.0.1"),),
+        )
+        status, payload = await CallbackHttpClient().post(
+            target,
+            body=b"{}",
+            headers={"Content-Type": "application/json"},
+        )
+    finally:
+        await server.close()
+
+    assert status == 200
+    assert payload == first + second
+
+
+@pytest.mark.asyncio
+async def test_callback_post_rejects_split_response_over_limit():
+    chunk = b"x" * 40_000
+
+    async def handler(_request):
+        response = web.StreamResponse(status=200)
+        await response.prepare(_request)
+        await response.write(chunk)
+        await asyncio.sleep(0.05)
+        await response.write(chunk)
+        await response.write_eof()
+        return response
+
+    app = web.Application()
+    app.router.add_post("/callback", handler)
+    server = TestServer(app)
+    await server.start_server()
+    try:
+        from beeper_events_sidecar.webhooks import ResolvedCallback
+
+        port = server.port
+        target = ResolvedCallback(
+            url=f"http://127.0.0.1:{port}/callback",
+            hostname="127.0.0.1",
+            port=port,
+            addresses=((socket.AF_INET, "127.0.0.1"),),
+        )
+        with pytest.raises(CallbackEndpointError) as exc:
+            await CallbackHttpClient().post(
+                target,
+                body=b"{}",
+                headers={"Content-Type": "application/json"},
+            )
+    finally:
+        await server.close()
+
+    assert exc.value.reason == "response_too_large"
+
 
 class FakeCallbackClient:
     def __init__(self):

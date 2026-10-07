@@ -185,13 +185,18 @@ class CallbackHttpClient:
                             "redirect",
                             "Callback endpoint returned a redirect",
                         )
-                    payload = await response.content.read(65_537)
-                    if len(payload) > 65_536:
-                        raise CallbackEndpointError(
-                            "response_too_large",
-                            "Callback response exceeded 64 KiB",
-                        )
-                    return response.status, payload
+                    payload = bytearray()
+                    while True:
+                        chunk = await response.content.read(16_384)
+                        if not chunk:
+                            break
+                        payload.extend(chunk)
+                        if len(payload) > 65_536:
+                            raise CallbackEndpointError(
+                                "response_too_large",
+                                "Callback response exceeded 64 KiB",
+                            )
+                    return response.status, bytes(payload)
             except TimeoutError as exc:
                 raise CallbackEndpointError(
                     "timeout", "Callback endpoint timed out"
