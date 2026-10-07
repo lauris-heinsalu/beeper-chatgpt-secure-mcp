@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import hmac
 import json
 import logging
+import time
 from datetime import timedelta
+from pathlib import Path
 from typing import Any
 
 from aiohttp import web
@@ -25,6 +28,58 @@ logger = logging.getLogger(__name__)
 _PROTOCOL_VERSION = "2026-07-28"
 _PRINCIPAL = "private-secure-tunnel"
 _EVENT_NAME = "message.created"
+
+
+class _BearerSecretUnavailable(RuntimeError):
+    pass
+
+
+class _BearerSecretCache:
+    def __init__(self, path: Path, refresh_seconds: int) -> None:
+        self._path = path
+        self._refresh_seconds = max(0, refresh_seconds)
+        self._value: str | None = None
+        self._refresh_after = 0.0
+        self._lock = asyncio.Lock()
+
+    async def get(self) -> str:
+        now = time.monotonic()
+        if now < self._refresh_after:
+            if self._value is None:
+                raise _BearerSecretUnavailable
+            return self._value
+
+        async with self._lock:
+            now = time.monotonic()
+            if now < self._refresh_after:
+                if self._value is None:
+                    raise _BearerSecretUnavailable
+                return self._value
+
+            try:
+                value = (
+                    await asyncio.to_thread(
+                        self._path.read_text,
+                        encoding="utf-8",
+                    )
+                ).strip()
+            except OSError as exc:
+                self._value = None
+                self._refresh_after = (
+                    time.monotonic() + self._refresh_seconds
+                )
+                raise _BearerSecretUnavailable from exc
+
+            if not value.startswith("Bearer "):
+                self._value = None
+                self._refresh_after = (
+                    time.monotonic() + self._refresh_seconds
+                )
+                raise _BearerSecretUnavailable
+
+            self._value = value
+            self._refresh_after = time.monotonic() + self._refresh_seconds
+            return value
 
 
 class RpcError(RuntimeError):
@@ -54,6 +109,10 @@ class McpApi:
         self.db = db
         self.service = service
         self.webhook_sender = webhook_sender
+        self._bearer_secret = _BearerSecretCache(
+            settings.mcp_bearer_file,
+            settings.mcp_bearer_refresh_seconds,
+        )
         self._subscription_mutations: dict[str, int] = {}
 
     def _next_subscription_mutation(self, subscription_id: str) -> int:
@@ -98,18 +157,9 @@ class McpApi:
             return await handler(request)
 
         try:
-            expected = self.settings.mcp_bearer_file.read_text(
-                encoding="utf-8"
-            ).strip()
-        except OSError:
-            logger.exception("Could not read MCP bearer secret")
-            return web.json_response(
-                {"error": "server authentication unavailable"},
-                status=503,
-            )
-
-        if not expected.startswith("Bearer "):
-            logger.error("MCP bearer secret is malformed")
+            expected = await self._bearer_secret.get()
+        except _BearerSecretUnavailable:
+            logger.error("MCP bearer secret is unavailable or malformed")
             return web.json_response(
                 {"error": "server authentication unavailable"},
                 status=503,

@@ -30,6 +30,7 @@ class Settings:
     callback_timeout_seconds: int
     log_level: str
     delivery_concurrency: int = 4
+    mcp_bearer_refresh_seconds: int = 2
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -110,5 +111,9 @@ class Settings:
             delivery_concurrency=max(
                 1,
                 _env_int("BEEPER_EVENTS_DELIVERY_CONCURRENCY", 4),
+            ),
+            mcp_bearer_refresh_seconds=max(
+                0,
+                _env_int("BEEPER_EVENTS_MCP_BEARER_REFRESH_SECONDS", 2),
             ),
         )

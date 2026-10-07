@@ -1,5 +1,7 @@
 import asyncio
 import base64
+import time
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -443,6 +445,115 @@ async def test_mcp_endpoint_requires_bearer(tmp_path):
         assert authorized.status == 200
         body = await authorized.json()
         assert body["result"]["supportedVersions"] == ["2026-07-28"]
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_bearer_secret_cache_offloads_and_serializes_refresh(
+    tmp_path,
+    monkeypatch,
+):
+    settings = _settings(tmp_path)
+    settings.mcp_bearer_file.write_text(
+        "Bearer test-secret", encoding="utf-8"
+    )
+    db = Database(settings.db_path)
+    db.initialize()
+    api = McpApi(
+        settings=settings,
+        db=db,
+        service=FakeService(),
+        webhook_sender=FakeSender(),
+    )
+
+    original_read_text = Path.read_text
+    reads = 0
+
+    def slow_read_text(path, *args, **kwargs):
+        nonlocal reads
+        reads += 1
+        time.sleep(0.05)
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", slow_read_text)
+
+    tasks = [
+        asyncio.create_task(api._bearer_secret.get())
+        for _ in range(8)
+    ]
+    await asyncio.sleep(0.01)
+    assert any(not task.done() for task in tasks)
+
+    values = await asyncio.gather(*tasks)
+    assert values == ["Bearer test-secret"] * 8
+    assert reads == 1
+
+
+@pytest.mark.asyncio
+async def test_bearer_secret_rotation_and_refresh_failure_fail_closed(tmp_path):
+    from aiohttp.test_utils import TestClient, TestServer
+
+    settings = replace(_settings(tmp_path), mcp_bearer_refresh_seconds=0)
+    settings.mcp_bearer_file.write_text(
+        "Bearer first-secret", encoding="utf-8"
+    )
+    db = Database(settings.db_path)
+    db.initialize()
+    api = McpApi(
+        settings=settings,
+        db=db,
+        service=FakeService(),
+        webhook_sender=FakeSender(),
+    )
+    client = TestClient(TestServer(api.application()))
+    await client.start_server()
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "server/discover",
+        "params": {},
+    }
+
+    try:
+        first = await client.post(
+            "/mcp",
+            json=payload,
+            headers={"Authorization": "Bearer first-secret"},
+        )
+        assert first.status == 200
+
+        settings.mcp_bearer_file.write_text(
+            "Bearer second-secret", encoding="utf-8"
+        )
+        stale = await client.post(
+            "/mcp",
+            json=payload,
+            headers={"Authorization": "Bearer first-secret"},
+        )
+        assert stale.status == 401
+        rotated = await client.post(
+            "/mcp",
+            json=payload,
+            headers={"Authorization": "Bearer second-secret"},
+        )
+        assert rotated.status == 200
+
+        settings.mcp_bearer_file.unlink()
+        missing = await client.post(
+            "/mcp",
+            json=payload,
+            headers={"Authorization": "Bearer second-secret"},
+        )
+        assert missing.status == 503
+
+        settings.mcp_bearer_file.write_text("not-a-bearer", encoding="utf-8")
+        malformed = await client.post(
+            "/mcp",
+            json=payload,
+            headers={"Authorization": "Bearer second-secret"},
+        )
+        assert malformed.status == 503
     finally:
         await client.close()
 
