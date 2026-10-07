@@ -4,16 +4,21 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "beeper-events-sidecar"
-version = "0.1.0"
-description = "Isolated, durable OpenAI MCP Events sidecar for a private Beeper Server."
+version = "1.0.0"
+description = "Durable MCP Events sidecar that adds realtime capture beside an unchanged Beeper MCP server."
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
 authors = [{ name = "Lauris Heinsalu" }]
+keywords = ["beeper", "chatgpt", "mcp", "events", "webhooks"]
 dependencies = [
   "aiohttp>=3.11,<4",
   "standardwebhooks==1.1.0",
 ]
+
+[project.urls]
+Repository = "https://github.com/lauris-heinsalu/beeper-chatgpt-secure-mcp"
+Issues = "https://github.com/lauris-heinsalu/beeper-chatgpt-secure-mcp/issues"
 
 [project.optional-dependencies]
 dev = [

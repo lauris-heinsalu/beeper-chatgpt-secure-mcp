@@ -287,6 +287,8 @@ The static Beeper credential represents one account's authority. This deployment
 
 This repository documents a private integration. OpenAI's current guide says Secure MCP Tunnel does not satisfy public plugin-directory submission requirements. Publishing the write-up does not publish the live connection, credentials, or messaging access.
 
+For release history see [CHANGELOG.md](CHANGELOG.md). Contributions are covered by [CONTRIBUTING.md](CONTRIBUTING.md), and security-sensitive reports by [SECURITY.md](SECURITY.md).
+
 ## Further reading
 
 - [OpenAI tunnel client and release instructions](https://github.com/openai/tunnel-client)
