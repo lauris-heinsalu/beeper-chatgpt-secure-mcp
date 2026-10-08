@@ -40,6 +40,26 @@ def configure_logging(level: str) -> None:
     root.setLevel(level)
 
 
+async def wait_for_shutdown_or_failure(
+    service: EventService, stop: asyncio.Event,
+) -> None:
+    signal_waiter = asyncio.create_task(stop.wait())
+    worker_waiter = asyncio.create_task(service.wait_for_worker_failure())
+    try:
+        finished, _ = await asyncio.wait(
+            {signal_waiter, worker_waiter},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        # Worker failure has priority when shutdown and crash coincide.
+        if worker_waiter in finished:
+            await worker_waiter
+    finally:
+        for task in (signal_waiter, worker_waiter):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(signal_waiter, worker_waiter, return_exceptions=True)
+
+
 async def run() -> None:
     settings = Settings.from_env()
     configure_logging(settings.log_level)
@@ -89,7 +109,7 @@ async def run() -> None:
                 pass
 
         try:
-            await stop.wait()
+            await wait_for_shutdown_or_failure(service, stop)
         finally:
             logger.info("Stopping Beeper Events sidecar")
             await runner.cleanup()

@@ -16,11 +16,11 @@ from .beeper import (
 )
 from .config import Settings
 from .db import Database
+from .identity import SourceIdentity
 from .models import (
     SourceEvent,
     isoformat_z,
     parse_timestamp,
-    stable_id,
     utc_now,
 )
 from .webhooks import CallbackEndpointError, WebhookSender
@@ -54,7 +54,7 @@ class EventService:
         self.last_source_error: str | None = None
 
     async def start(self) -> None:
-        await self.db.run_async(self.db.initialize)
+        await self.db.run_async(self.db.initialize, self.settings.source_instance)
         now = isoformat_z(utc_now())
         checkpoint = await self.db.run_async(
             self.db.get_checkpoint,
@@ -83,6 +83,33 @@ class EventService:
                 self._delivery_loop(), name="webhook-delivery"
             ),
         ]
+
+    async def wait_for_worker_failure(self) -> None:
+        """Fail the owning process if any background worker unexpectedly exits.
+
+        Called by main alongside the shutdown signal. Never expose the
+        original exception text in the persisted incident.
+        """
+        if not self._tasks:
+            raise RuntimeError("No background workers were started")
+        finished, _ = await asyncio.wait(
+            self._tasks, return_when=asyncio.FIRST_COMPLETED
+        )
+        if self._stop.is_set():
+            return
+        name = min(task.get_name() for task in finished)
+        # Retrieve exceptions to avoid 'Task exception was never retrieved'.
+        for task in finished:
+            if not task.cancelled():
+                task.exception()
+        try:
+            await self.db.run_async(
+                self.db.record_incident, "WORKER_FAILURE",
+                isoformat_z(utc_now()),
+            )
+        except Exception:  # noqa: BLE001 - worker supervisor must still exit
+            logger.error("Failed to persist sanitized worker failure incident")
+        raise RuntimeError(f"Background worker exited unexpectedly: {name}")
 
     async def stop(self) -> None:
         self._stop.set()
@@ -128,16 +155,13 @@ class EventService:
                         self.last_source_event_at = isoformat_z(utc_now())
                         await self._ingest_ws_event(event)
                     elif event.get("type") == "error":
-                        logger.warning(
-                            "Beeper WebSocket control error: %s",
-                            event.get("message"),
-                        )
+                        logger.warning("Beeper WebSocket control error (details suppressed)")
 
                 raise BeeperError("Beeper WebSocket ended")
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 - daemon boundary
-                self.last_source_error = f"{type(exc).__name__}: {exc}"[:1000]
+                self.last_source_error = type(exc).__name__
                 logger.warning(
                     "Beeper WebSocket source disconnected: %s",
                     self.last_source_error,
@@ -202,12 +226,20 @@ class EventService:
             )
             if normalized is None:
                 continue
-            inserted = await self.db.run_async(
-                self.db.record_event_and_enqueue,
-                normalized,
-                now=isoformat_z(utc_now()),
-                deliverable=True,
-            )
+            try:
+                inserted = await self.db.run_async(
+                    self.db.record_event_and_enqueue,
+                    normalized,
+                    now=isoformat_z(utc_now()),
+                    deliverable=True,
+                )
+            except (sqlite3.IntegrityError, ValueError):
+                await self.db.run_async(
+                    self.db.record_incident, "INGEST_INTEGRITY_ERROR",
+                    isoformat_z(utc_now()),
+                )
+                self.request_reconcile()
+                raise RuntimeError("Source ingestion failed integrity validation") from None
             if inserted:
                 logger.info(
                     "Recorded incoming Beeper message event %s",
@@ -301,12 +333,15 @@ class EventService:
         if not isinstance(sender_name, str):
             sender_name = None
 
-        source_key = (
-            f"beeper:{account_id}:{chat_id}:{message_id}"
+        identity = SourceIdentity(
+            "beeper", self.settings.source_instance,
+            account_id, chat_id, message_id,
         )
         return SourceEvent(
-            source_key=source_key,
-            source_event_id=stable_id("src_", source_key),
+            source_key=identity.source_key,
+            source_event_id=identity.source_event_id,
+            source_system=identity.source_system,
+            source_instance=identity.source_instance,
             name="message.created",
             occurred_at=occurred_at,
             account_id=account_id,
@@ -336,6 +371,12 @@ class EventService:
                 await self.reconcile_once()
             except asyncio.CancelledError:
                 raise
+            except (sqlite3.IntegrityError, ValueError):
+                await self.db.run_async(
+                    self.db.record_incident, "INGEST_INTEGRITY_ERROR",
+                    isoformat_z(utc_now()),
+                )
+                logger.error("Beeper reconciliation failed integrity validation")
             except Exception:
                 logger.exception("Beeper reconciliation failed")
 
@@ -515,11 +556,15 @@ class EventService:
             return
         delivery = current_delivery
 
+        data = delivery.source_event.payload()
+        diagnostics = await self.db.run_async(self.db.incident_diagnostics)
+        if diagnostics is not None:
+            data["diagnostics"] = diagnostics
         event = {
             "eventId": delivery.event_id,
             "name": delivery.source_event.name,
             "timestamp": delivery.source_event.occurred_at,
-            "data": delivery.source_event.payload(),
+            "data": data,
             "cursor": None,
         }
 
@@ -550,13 +595,13 @@ class EventService:
                 return
             error = f"Webhook returned HTTP {status_code}"
         except CallbackEndpointError as exc:
-            error = f"{exc.reason}: {exc}"
+            error = f"CallbackEndpointError:{exc.reason}"
             if exc.reason in {
                 "invalid_url",
                 "private_address",
                 "payload_too_large",
             }:
-                await self.db.run_async(
+                marked_dead = await self.db.run_async(
                     self.db.mark_delivery_dead,
                     delivery.event_id,
                     subscription_id=delivery.subscription.id,
@@ -567,9 +612,14 @@ class EventService:
                     status_code=None,
                     error=error,
                 )
+                if marked_dead:
+                    await self.db.run_async(
+                        self.db.record_incident, "DELIVERY_DEAD_LETTER",
+                        isoformat_z(utc_now()),
+                    )
                 return
         except Exception as exc:  # noqa: BLE001 - persist unexpected delivery failures
-            error = f"{type(exc).__name__}: {exc}"
+            error = type(exc).__name__
 
         attempts_after_this = delivery.attempt_count + 1
         permanent_http = (
@@ -585,7 +635,7 @@ class EventService:
             or attempts_after_this
             >= self.settings.delivery_max_attempts
         ):
-            await self.db.run_async(
+            marked_dead = await self.db.run_async(
                 self.db.mark_delivery_dead,
                 delivery.event_id,
                 subscription_id=delivery.subscription.id,
@@ -594,6 +644,11 @@ class EventService:
                 status_code=status_code,
                 error=error,
             )
+            if marked_dead:
+                await self.db.run_async(
+                    self.db.record_incident, "DELIVERY_DEAD_LETTER",
+                    isoformat_z(utc_now()),
+                )
             logger.error(
                 "Webhook delivery moved to dead letter: %s",
                 delivery.event_id,

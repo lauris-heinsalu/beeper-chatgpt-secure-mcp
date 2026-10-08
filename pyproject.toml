@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "beeper-events-sidecar"
-version = "1.0.0"
+version = "1.0.1"
 description = "Durable MCP Events sidecar that adds realtime capture beside an unchanged Beeper MCP server."
 readme = "README.md"
 requires-python = ">=3.12"

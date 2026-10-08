@@ -9,6 +9,7 @@ import pytest
 from beeper_events_sidecar.beeper import ReconciliationWindowTooLarge
 from beeper_events_sidecar.config import Settings
 from beeper_events_sidecar.db import Database
+from beeper_events_sidecar.identity import SourceIdentity
 from beeper_events_sidecar.models import (
     Subscription,
     isoformat_z,
@@ -324,8 +325,8 @@ def _delivery_fixture(tmp_path, sender):
     )
     db.upsert_subscription(subscription, now=now_text)
     event = SourceEvent(
-        source_key="beeper:whatsapp:chat:message",
-        source_event_id="src-delivery",
+        source_key=SourceIdentity("beeper", "default", "whatsapp", "chat", "message").source_key,
+        source_event_id=SourceIdentity("beeper", "default", "whatsapp", "chat", "message").source_event_id,
         name="message.created",
         occurred_at=now_text,
         account_id="whatsapp",
@@ -384,8 +385,8 @@ async def _mcp_delivery_fixture(tmp_path, sender, *, message_id: str):
 
     event_time = utc_now() + timedelta(seconds=1)
     event = SourceEvent(
-        source_key=f"beeper:whatsapp:chat:{message_id}",
-        source_event_id=f"src-{message_id}",
+        source_key=SourceIdentity("beeper", "default", "whatsapp", "chat", message_id).source_key,
+        source_event_id=SourceIdentity("beeper", "default", "whatsapp", "chat", message_id).source_event_id,
         name="message.created",
         occurred_at=isoformat_z(event_time),
         account_id="whatsapp",
@@ -430,8 +431,8 @@ async def test_delivery_batch_runs_with_bounded_concurrency(tmp_path):
 
     for suffix in ("two", "three"):
         event = SourceEvent(
-            source_key=f"beeper:whatsapp:chat:message-{suffix}",
-            source_event_id=f"src-delivery-{suffix}",
+            source_key=SourceIdentity("beeper", "default", "whatsapp", "chat", f"message-{suffix}").source_key,
+            source_event_id=SourceIdentity("beeper", "default", "whatsapp", "chat", f"message-{suffix}").source_event_id,
             name="message.created",
             occurred_at=now_text,
             account_id="whatsapp",

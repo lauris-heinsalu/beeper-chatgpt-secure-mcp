@@ -2,6 +2,23 @@
 
 All notable public releases are documented here.
 
+## v1.0.1 — 2026-10-08 (release candidate)
+
+- Add unambiguous, versioned source occurrence IDs, explicit source namespace,
+  and SQLite uniqueness checks with fail-closed conflict handling.
+- Add backed-up, atomic v1-to-v2 SQLite migration preserving subscriptions,
+  delivery statuses, prior webhook event IDs and reconciliation checkpoints.
+- Add persistent, deduplicated and safely summarized integrity, dead-letter
+  and worker-failure incidents to the existing `events_status` MCP tool.
+- Add optional `message.created.data.diagnostics` only while incidents remain
+  unresolved; normal messages retain their original event payload.
+- Supervise background workers and fail the owning process on unexpected exit
+  rather than leaving a stalled daemon.
+- Suppress upstream exception details in MCP source status, webhook retry records
+  and WebSocket control logs to avoid exposing credentials or private content.
+- All changes are staged in an isolated local branch; live deployment and
+  release checks have not yet been performed.
+
 ## v1.0.0 — 2026-10-07
 
 First public release.

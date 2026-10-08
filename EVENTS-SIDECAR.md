@@ -184,6 +184,72 @@ This repository describes a single-owner private deployment. A multi-user
 service would need a real authenticated principal model and per-user
 authorization checks rather than the fixed private-tunnel principal used here.
 
+## SQLite identity schema v2 (planned for v1.0.1)
+
+The sidecar now uses a deterministic, versioned identity: `source_system`,
+`source_instance`, `account_id`, `chat_id`, and `message_id` are serialized
+unambiguously before hashing. SQLite independently enforces uniqueness of the
+five raw components and of the canonical identity. Expected repeats are
+idempotent; unrelated constraint failures are not silently ignored.
+
+`BEEPER_EVENTS_SOURCE_INSTANCE` defaults to `default` and identifies the **logical
+Beeper source**, not a VM, process, tunnel, or machine. For Recall aggregation
+across independent providers or installations, set a stable, distinctive label
+**before the first v2 initialization** (for example `personal-beeper`); do not
+rotate it on restart. Once the database is initialized, the selected value is
+pinned in `schema_meta`. Changing it later requires an explicit migration;
+the service refuses to start with a mismatch.
+
+For an existing v1 SQLite database, first stop only the Events sidecar and
+retain the separate native Beeper MCP connection. On first v2 initialization the
+service creates `state.sqlite3.pre-v2.bak` via SQLite's online backup API,
+then rebuilds `source_events` and `deliveries` atomically in a single SQLite
+transaction with foreign keys enforced. Source keys and source event IDs are
+upgraded to v2. Existing subscription records, reconciliation checkpoints,
+delivery statuses, and **all already-issued `deliveries.event_id` values** are
+preserved. A failed validation rolls the schema changes back and prevents
+startup; the pre-v2 backup is not overwritten on retries.
+
+After deployment, confirm `PRAGMA user_version=2`,
+`PRAGMA foreign_key_check` returns no rows, and that both native MCP and Events
+paths still work. The staged implementation has not yet been deployed.
+
+## Persisted incidents and conditional event diagnostics (staged for v1.0.1)
+
+Serious ingestion integrity violations, permanent webhook delivery failures,
+and unexpectedly terminated background workers create sanitized records in the
+existing SQLite database. The `events_status` MCP tool returns
+`unresolved_incidents` and up to five `recent_incidents`, including stable
+incident IDs, fixed error codes, human-readable **static** messages, counts and
+timestamps. Raw exception text, credentials, message text, and source identifiers
+are not stored in incident records.
+
+Only when at least one incident is unresolved does a `message.created`
+delivery carry an **optional** `data.diagnostics` object with incident ID,
+code, severity and unresolved count. Otherwise the payload remains unchanged.
+`events/list` advertises the optional field in its strict `payloadSchema`.
+
+An existing event-triggered automation can inspect this optional field and
+call `events_status` only when it appears. Repeated events for the same
+incident use the same incident ID; after manual resolution, a new occurrence
+gets a new ID. No separate monitor, notification service, or additional MCP
+call per healthy message is required.
+
+Limitations: incidents reach an agent only on a subsequently delivered
+message, not instantly. If there is no new incoming message, if the webhook
+path itself is failing, or if the entire sidecar is down, this is **not**
+independent monitoring. Serious worker failure is persisted when possible and
+propagated to the main process for systemd to restart; inability to write an
+incident does not prevent fail-fast shutdown.
+
+Incident resolution is currently an internal database operation, not an
+exposed MCP write tool. An operator should resolve only after diagnosing the
+underlying problem. Operator logs are a separate channel and may contain
+upstream error details; review them before sharing. MCP incident descriptions
+use only the allowlisted static messages above. Connection status and delivery
+retry reasons use safe exception class names or fixed callback reason codes;
+untrusted WebSocket control-error text is suppressed in logs.
+
 ## Local development
 
 Python 3.12+:
