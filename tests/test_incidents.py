@@ -292,3 +292,61 @@ async def test_clean_shutdown_has_no_worker_failure_incident(tmp_path):
     await asyncio.wait_for(wait_for_shutdown_or_failure(service, signal), timeout=1)
     await service.stop()
     assert db.stats(NOW)["unresolved_incidents"] == 0
+
+
+@pytest.mark.asyncio
+async def test_source_error_does_not_expose_upstream_exception_to_mcp_status(
+    tmp_path, caplog
+):
+    _db, service, _sender, _delivery = _fixture(tmp_path)
+
+    class FailingBeeper:
+        async def open_event_websocket(self):
+            service._stop.set()
+            raise RuntimeError("Bearer ultra-sensitive-access-token")
+
+    service.beeper = FailingBeeper()
+    service.settings.reconnect_max_seconds = 2
+    await service._source_loop()
+    assert "ultra-sensitive-access-token" not in json.dumps(service.status())
+    assert "ultra-sensitive-access-token" not in caplog.text
+    assert service.status()["last_source_error"] == "RuntimeError"
+
+
+@pytest.mark.asyncio
+async def test_webhook_exception_details_are_not_persisted_or_logged(tmp_path, caplog):
+    db, service, sender, delivery = _fixture(tmp_path)
+
+    async def fail_webhook(**kwargs):
+        raise RuntimeError("Bearer ultra-sensitive-webhook-credential")
+
+    sender.send_event = fail_webhook
+    await service._deliver(delivery)
+    with closing(sqlite3.connect(db.path)) as conn:
+        persisted = conn.execute(
+            "SELECT last_error FROM deliveries WHERE event_id=?",
+            (delivery.event_id,),
+        ).fetchone()[0]
+    assert persisted == "RuntimeError"
+    assert "ultra-sensitive-webhook-credential" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_websocket_control_error_does_not_log_untrusted_source_text(
+    tmp_path, caplog
+):
+    _db, service, _sender, _delivery = _fixture(tmp_path)
+
+    class ControlErrorSource:
+        async def open_event_websocket(self):
+            return SimpleNamespace(closed=True)
+
+        async def websocket_events(self, ws):
+            yield {"type": "error", "message": "Bearer ws-control-sensitive-value"}
+            service._stop.set()
+
+    service.beeper = ControlErrorSource()
+    service.settings.reconnect_max_seconds = 1
+    await asyncio.wait_for(service._source_loop(), timeout=1)
+    assert "ws-control-sensitive-value" not in caplog.text
+    assert "WebSocket control error" in caplog.text

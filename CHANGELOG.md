@@ -2,7 +2,7 @@
 
 All notable public releases are documented here.
 
-## Unreleased — v1.0.1 candidate
+## v1.0.1 — 2026-10-08 (release candidate)
 
 - Add unambiguous, versioned source occurrence IDs, explicit source namespace,
   and SQLite uniqueness checks with fail-closed conflict handling.
@@ -14,6 +14,8 @@ All notable public releases are documented here.
   unresolved; normal messages retain their original event payload.
 - Supervise background workers and fail the owning process on unexpected exit
   rather than leaving a stalled daemon.
+- Suppress upstream exception details in MCP source status, webhook retry records
+  and WebSocket control logs to avoid exposing credentials or private content.
 - All changes are staged in an isolated local branch; live deployment and
   release checks have not yet been performed.
 

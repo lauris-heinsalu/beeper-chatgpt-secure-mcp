@@ -155,16 +155,13 @@ class EventService:
                         self.last_source_event_at = isoformat_z(utc_now())
                         await self._ingest_ws_event(event)
                     elif event.get("type") == "error":
-                        logger.warning(
-                            "Beeper WebSocket control error: %s",
-                            event.get("message"),
-                        )
+                        logger.warning("Beeper WebSocket control error (details suppressed)")
 
                 raise BeeperError("Beeper WebSocket ended")
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 - daemon boundary
-                self.last_source_error = f"{type(exc).__name__}: {exc}"[:1000]
+                self.last_source_error = type(exc).__name__
                 logger.warning(
                     "Beeper WebSocket source disconnected: %s",
                     self.last_source_error,
@@ -598,7 +595,7 @@ class EventService:
                 return
             error = f"Webhook returned HTTP {status_code}"
         except CallbackEndpointError as exc:
-            error = f"{exc.reason}: {exc}"
+            error = f"CallbackEndpointError:{exc.reason}"
             if exc.reason in {
                 "invalid_url",
                 "private_address",
@@ -622,7 +619,7 @@ class EventService:
                     )
                 return
         except Exception as exc:  # noqa: BLE001 - persist unexpected delivery failures
-            error = f"{type(exc).__name__}: {exc}"
+            error = type(exc).__name__
 
         attempts_after_this = delivery.attempt_count + 1
         permanent_http = (

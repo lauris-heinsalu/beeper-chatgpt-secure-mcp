@@ -246,7 +246,9 @@ Incident resolution is currently an internal database operation, not an
 exposed MCP write tool. An operator should resolve only after diagnosing the
 underlying problem. Operator logs are a separate channel and may contain
 upstream error details; review them before sharing. MCP incident descriptions
-use only the allowlisted static messages above.
+use only the allowlisted static messages above. Connection status and delivery
+retry reasons use safe exception class names or fixed callback reason codes;
+untrusted WebSocket control-error text is suppressed in logs.
 
 ## Local development
 
