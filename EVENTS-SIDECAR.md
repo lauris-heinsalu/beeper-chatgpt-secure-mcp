@@ -184,6 +184,36 @@ This repository describes a single-owner private deployment. A multi-user
 service would need a real authenticated principal model and per-user
 authorization checks rather than the fixed private-tunnel principal used here.
 
+## SQLite identity schema v2 (planned for v1.0.1)
+
+The sidecar now uses a deterministic, versioned identity: `source_system`,
+`source_instance`, `account_id`, `chat_id`, and `message_id` are serialized
+unambiguously before hashing. SQLite independently enforces uniqueness of the
+five raw components and of the canonical identity. Expected repeats are
+idempotent; unrelated constraint failures are not silently ignored.
+
+`BEEPER_EVENTS_SOURCE_INSTANCE` defaults to `default` and identifies the **logical
+Beeper source**, not a VM, process, tunnel, or machine. For Recall aggregation
+across independent providers or installations, set a stable, distinctive label
+**before the first v2 initialization** (for example `personal-beeper`); do not
+rotate it on restart. Once the database is initialized, the selected value is
+pinned in `schema_meta`. Changing it later requires an explicit migration;
+the service refuses to start with a mismatch.
+
+For an existing v1 SQLite database, first stop only the Events sidecar and
+retain the separate native Beeper MCP connection. On first v2 initialization the
+service creates `state.sqlite3.pre-v2.bak` via SQLite's online backup API,
+then rebuilds `source_events` and `deliveries` atomically in a single SQLite
+transaction with foreign keys enforced. Source keys and source event IDs are
+upgraded to v2. Existing subscription records, reconciliation checkpoints,
+delivery statuses, and **all already-issued `deliveries.event_id` values** are
+preserved. A failed validation rolls the schema changes back and prevents
+startup; the pre-v2 backup is not overwritten on retries.
+
+After deployment, confirm `PRAGMA user_version=2`,
+`PRAGMA foreign_key_check` returns no rows, and that both native MCP and Events
+paths still work. The staged implementation has not yet been deployed.
+
 ## Local development
 
 Python 3.12+:

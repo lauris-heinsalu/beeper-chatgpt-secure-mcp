@@ -16,11 +16,11 @@ from .beeper import (
 )
 from .config import Settings
 from .db import Database
+from .identity import SourceIdentity
 from .models import (
     SourceEvent,
     isoformat_z,
     parse_timestamp,
-    stable_id,
     utc_now,
 )
 from .webhooks import CallbackEndpointError, WebhookSender
@@ -54,7 +54,7 @@ class EventService:
         self.last_source_error: str | None = None
 
     async def start(self) -> None:
-        await self.db.run_async(self.db.initialize)
+        await self.db.run_async(self.db.initialize, self.settings.source_instance)
         now = isoformat_z(utc_now())
         checkpoint = await self.db.run_async(
             self.db.get_checkpoint,
@@ -301,12 +301,15 @@ class EventService:
         if not isinstance(sender_name, str):
             sender_name = None
 
-        source_key = (
-            f"beeper:{account_id}:{chat_id}:{message_id}"
+        identity = SourceIdentity(
+            "beeper", self.settings.source_instance,
+            account_id, chat_id, message_id,
         )
         return SourceEvent(
-            source_key=source_key,
-            source_event_id=stable_id("src_", source_key),
+            source_key=identity.source_key,
+            source_event_id=identity.source_event_id,
+            source_system=identity.source_system,
+            source_instance=identity.source_instance,
             name="message.created",
             occurred_at=occurred_at,
             account_id=account_id,

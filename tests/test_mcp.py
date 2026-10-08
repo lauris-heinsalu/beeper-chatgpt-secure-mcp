@@ -8,6 +8,7 @@ import pytest
 
 from beeper_events_sidecar.config import Settings
 from beeper_events_sidecar.db import Database
+from beeper_events_sidecar.identity import SourceIdentity
 from beeper_events_sidecar.mcp import McpApi, RpcError
 from beeper_events_sidecar.models import isoformat_z, utc_now
 
@@ -200,8 +201,8 @@ async def test_event_seen_during_initial_verification_is_backfilled(tmp_path):
 
     event_time = utc_now()
     event = SourceEvent(
-        source_key="beeper:a:c:m-during-verify",
-        source_event_id="src_during_verify",
+        source_key=SourceIdentity("beeper", "default", "a", "c", "m-during-verify").source_key,
+        source_event_id=SourceIdentity("beeper", "default", "a", "c", "m-during-verify").source_event_id,
         name="message.created",
         occurred_at=isoformat_z(event_time),
         account_id="a",
@@ -601,8 +602,8 @@ async def test_unsubscribe_cancels_pending_and_resubscribe_starts_fresh(
 
     event_time = utc_now() + timedelta(seconds=1)
     event = SourceEvent(
-        source_key="beeper:a:c:m-old",
-        source_event_id="src_old",
+        source_key=SourceIdentity("beeper", "default", "a", "c", "m-old").source_key,
+        source_event_id=SourceIdentity("beeper", "default", "a", "c", "m-old").source_event_id,
         name="message.created",
         occurred_at=isoformat_z(event_time),
         account_id="a",

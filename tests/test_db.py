@@ -8,6 +8,7 @@ import pytest
 
 import beeper_events_sidecar.db as db_module
 from beeper_events_sidecar.db import Database
+from beeper_events_sidecar.identity import SourceIdentity
 from beeper_events_sidecar.models import (
     SourceEvent,
     Subscription,
@@ -34,8 +35,8 @@ def _subscription(now: str) -> Subscription:
 
 def _event(timestamp: str, message_id: str = "m1") -> SourceEvent:
     return SourceEvent(
-        source_key=f"beeper:a:c:{message_id}",
-        source_event_id=f"src_{message_id}",
+        source_key=SourceIdentity("beeper", "default", "a", "c", message_id).source_key,
+        source_event_id=SourceIdentity("beeper", "default", "a", "c", message_id).source_event_id,
         name="message.created",
         occurred_at=timestamp,
         account_id="a",
@@ -168,8 +169,8 @@ def test_duplicate_event_enrichment_can_create_previously_missed_delivery(
 
     occurred_at = isoformat_z(now + timedelta(seconds=1))
     incomplete = SourceEvent(
-        source_key="beeper:a:c:m-enriched",
-        source_event_id="src_m-enriched",
+        source_key=SourceIdentity("beeper", "default", "a", "c", "m-enriched").source_key,
+        source_event_id=SourceIdentity("beeper", "default", "a", "c", "m-enriched").source_event_id,
         name="message.created",
         occurred_at=occurred_at,
         account_id="a",

@@ -5,10 +5,11 @@ import json
 import os
 import sqlite3
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import Any, TypeVar
 
+from .identity import SourceIdentity
 from .models import (
     PendingDelivery,
     SourceEvent,
@@ -46,6 +47,9 @@ CREATE TABLE IF NOT EXISTS callback_verifications (
 CREATE TABLE IF NOT EXISTS source_events (
     source_key TEXT PRIMARY KEY,
     source_event_id TEXT NOT NULL UNIQUE,
+    source_system TEXT NOT NULL,
+    source_instance TEXT NOT NULL,
+    canonical_identity TEXT NOT NULL UNIQUE,
     name TEXT NOT NULL,
     occurred_at TEXT NOT NULL,
     account_id TEXT NOT NULL,
@@ -56,7 +60,8 @@ CREATE TABLE IF NOT EXISTS source_events (
     sender_id TEXT,
     sender_name TEXT,
     discovered_via TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    UNIQUE (source_system, source_instance, account_id, chat_id, message_id)
 );
 
 CREATE TABLE IF NOT EXISTS deliveries (
@@ -83,6 +88,11 @@ CREATE TABLE IF NOT EXISTS checkpoints (
     value TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS schema_meta (
+    name TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
 
 
@@ -90,6 +100,7 @@ class Database:
     def __init__(self, path: Path) -> None:
         self.path = path
         self._async_lock = asyncio.Lock()
+        self.source_instance = "default"
 
     async def run_async(
         self,
@@ -101,18 +112,188 @@ class Database:
         async with self._async_lock:
             return await asyncio.to_thread(function, *args, **kwargs)
 
-    def initialize(self) -> None:
+    def initialize(self, source_instance: str = "default") -> None:
+        if not source_instance or not isinstance(source_instance, str):
+            raise ValueError("source_instance must be a non-empty string")
         self.path.parent.mkdir(parents=True, exist_ok=True)
         try:
             os.chmod(self.path.parent, 0o700)
         except OSError:
             pass
+
         with self._connect() as conn:
-            conn.executescript(_SCHEMA)
+            old_table = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='source_events'"
+            ).fetchone()
+            legacy = old_table is not None and "source_system" not in {
+                str(row["name"])
+                for row in conn.execute("PRAGMA table_info(source_events)")
+            }
+            version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+            if version > 2:
+                raise RuntimeError("SQLite schema is newer than this sidecar")
+            if legacy:
+                self._backup_legacy(conn)
+                self._migrate_legacy(conn, source_instance)
+            else:
+                if version == 1:
+                    raise RuntimeError(
+                        "Schema version is v1, but v1 source columns are absent"
+                    )
+                conn.executescript(_SCHEMA)
+                with conn:
+                    conn.execute(
+                        "INSERT INTO schema_meta(name,value) VALUES('source_instance',?) "
+                        "ON CONFLICT(name) DO NOTHING",
+                        (source_instance,),
+                    )
+                    stored = conn.execute(
+                        "SELECT value FROM schema_meta WHERE name='source_instance'"
+                    ).fetchone()
+                    if stored is None or stored["value"] != source_instance:
+                        raise ValueError(
+                            "source_instance differs from persisted database identity"
+                        )
+                    conn.execute("PRAGMA user_version=2")
+                    if conn.execute("PRAGMA foreign_key_check").fetchone():
+                        raise sqlite3.IntegrityError(
+                            "Foreign key violation during initialization"
+                        )
+
+        self.source_instance = source_instance
         try:
             os.chmod(self.path, 0o600)
         except OSError:
             pass
+
+    def _backup_legacy(self, conn: sqlite3.Connection) -> None:
+        # A fail-closed, once-only backup. Do not overwrite a prior recovery copy.
+        backup_path = self.path.with_name(self.path.name + ".pre-v2.bak")
+        if backup_path.exists():
+            raise RuntimeError(
+                "Pre-v2 backup already exists; inspect migration before retry"
+            )
+        descriptor = os.open(
+            backup_path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600
+        )
+        os.close(descriptor)
+        try:
+            with closing(sqlite3.connect(backup_path)) as destination:
+                conn.backup(destination)
+            os.chmod(backup_path, 0o600)
+        except Exception:
+            backup_path.unlink(missing_ok=True)
+            raise
+
+    @staticmethod
+    def _migrate_legacy(conn: sqlite3.Connection, source_instance: str) -> None:
+        # Both tables are rebuilt in one transaction, with FKs kept enabled.
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            """
+            CREATE TABLE source_events_v2 (
+                source_key TEXT PRIMARY KEY,
+                source_event_id TEXT NOT NULL UNIQUE,
+                source_system TEXT NOT NULL,
+                source_instance TEXT NOT NULL,
+                canonical_identity TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL,
+                occurred_at TEXT NOT NULL,
+                account_id TEXT NOT NULL,
+                chat_id TEXT NOT NULL,
+                local_chat_id TEXT,
+                network TEXT,
+                message_id TEXT NOT NULL,
+                sender_id TEXT,
+                sender_name TEXT,
+                discovered_via TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE (source_system,source_instance,account_id,chat_id,message_id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE deliveries_v2 (
+                subscription_id TEXT NOT NULL,
+                source_key TEXT NOT NULL,
+                event_id TEXT NOT NULL UNIQUE,
+                status TEXT NOT NULL,
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at TEXT NOT NULL,
+                last_attempt_at TEXT,
+                last_status_code INTEGER,
+                last_error TEXT,
+                delivered_at TEXT,
+                PRIMARY KEY (subscription_id,source_key),
+                FOREIGN KEY (subscription_id) REFERENCES subscriptions(id),
+                FOREIGN KEY (source_key) REFERENCES source_events_v2(source_key)
+            )
+            """
+        )
+        mapping: dict[str, str] = {}
+        rows = conn.execute("SELECT * FROM source_events").fetchall()
+        for row in rows:
+            identity = SourceIdentity(
+                "beeper", source_instance,
+                row["account_id"], row["chat_id"], row["message_id"],
+            )
+            conn.execute(
+                """
+                INSERT INTO source_events_v2 (
+                    source_key,source_event_id,source_system,source_instance,
+                    canonical_identity,name,occurred_at,account_id,chat_id,
+                    local_chat_id,network,message_id,sender_id,sender_name,
+                    discovered_via,created_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    identity.source_key, identity.source_event_id,
+                    identity.source_system, identity.source_instance,
+                    identity.canonical, row["name"], row["occurred_at"],
+                    row["account_id"], row["chat_id"], row["local_chat_id"],
+                    row["network"], row["message_id"], row["sender_id"],
+                    row["sender_name"], row["discovered_via"], row["created_at"],
+                ),
+            )
+            mapping[str(row["source_key"])] = identity.source_key
+
+        for row in conn.execute("SELECT * FROM deliveries").fetchall():
+            if row["source_key"] not in mapping:
+                raise sqlite3.IntegrityError(
+                    "Unresolvable legacy delivery source reference"
+                )
+            conn.execute(
+                """
+                INSERT INTO deliveries_v2 (
+                    subscription_id,source_key,event_id,status,attempt_count,
+                    next_attempt_at,last_attempt_at,last_status_code,last_error,delivered_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    row["subscription_id"],mapping[row["source_key"]],
+                    row["event_id"],row["status"],row["attempt_count"],
+                    row["next_attempt_at"],row["last_attempt_at"],
+                    row["last_status_code"],row["last_error"],row["delivered_at"],
+                ),
+            )
+        conn.execute("DROP TABLE deliveries")
+        conn.execute("DROP TABLE source_events")
+        conn.execute("ALTER TABLE source_events_v2 RENAME TO source_events")
+        conn.execute("ALTER TABLE deliveries_v2 RENAME TO deliveries")
+        conn.execute(
+            "CREATE INDEX deliveries_due_idx ON deliveries(status, next_attempt_at)"
+        )
+        conn.execute(
+            "CREATE TABLE schema_meta(name TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO schema_meta(name,value) VALUES('source_instance',?)",
+            (source_instance,),
+        )
+        conn.execute("PRAGMA user_version=2")
+        if conn.execute("PRAGMA foreign_key_check").fetchone():
+            raise sqlite3.IntegrityError("Foreign key violation during v2 migration")
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -150,6 +331,8 @@ class Database:
             source_key=row["source_key"],
             source_event_id=row["source_event_id"],
             name=row["name"],
+            source_system=row["source_system"],
+            source_instance=row["source_instance"],
             occurred_at=row["occurred_at"],
             account_id=row["account_id"],
             chat_id=row["chat_id"],
@@ -324,20 +507,32 @@ class Database:
         now: str,
         deliverable: bool = True,
     ) -> bool:
+        identity = SourceIdentity(
+            event.source_system, event.source_instance,
+            event.account_id, event.chat_id, event.message_id,
+        )
+        if event.source_instance != self.source_instance:
+            raise ValueError("source_instance does not match database identity")
+        if event.source_key != identity.source_key or event.source_event_id != identity.source_event_id:
+            raise ValueError("Source identity key or event ID does not match the canonical identity")
         with self._connect() as conn:
             cursor = conn.execute(
                 """
-                INSERT OR IGNORE INTO source_events(
-                    source_key, source_event_id, name, occurred_at,
-                    account_id, chat_id, local_chat_id, network,
-                    message_id, sender_id, sender_name, discovered_via,
-                    created_at
+                INSERT INTO source_events(
+                    source_key, source_event_id, source_system, source_instance,
+                    canonical_identity, name, occurred_at, account_id, chat_id,
+                    local_chat_id, network, message_id, sender_id, sender_name,
+                    discovered_via, created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source_key) DO NOTHING
                 """,
                 (
                     event.source_key,
                     event.source_event_id,
+                    identity.source_system,
+                    identity.source_instance,
+                    identity.canonical,
                     event.name,
                     event.occurred_at,
                     event.account_id,
@@ -379,6 +574,10 @@ class Database:
                     raise RuntimeError(
                         "Source event disappeared during duplicate enrichment"
                     )
+                if row["canonical_identity"] != identity.canonical:
+                    raise sqlite3.IntegrityError(
+                        "Source key collision between distinct source identities"
+                    )
                 effective_event = self._event_from_row(row)
 
             if not deliverable:
@@ -402,11 +601,12 @@ class Database:
                 )
                 conn.execute(
                     """
-                    INSERT OR IGNORE INTO deliveries(
+                    INSERT INTO deliveries(
                         subscription_id, source_key, event_id, status,
                         attempt_count, next_attempt_at
                     )
                     VALUES (?, ?, ?, 'pending', 0, ?)
+                    ON CONFLICT(subscription_id, source_key) DO NOTHING
                     """,
                     (
                         subscription.id,
@@ -443,11 +643,12 @@ class Database:
             )
             cursor = conn.execute(
                 """
-                INSERT OR IGNORE INTO deliveries(
+                INSERT INTO deliveries(
                     subscription_id, source_key, event_id, status,
                     attempt_count, next_attempt_at
                 )
                 VALUES (?, ?, ?, 'pending', 0, ?)
+                ON CONFLICT(subscription_id, source_key) DO NOTHING
                 """,
                 (
                     subscription.id,

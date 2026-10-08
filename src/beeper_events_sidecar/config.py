@@ -32,6 +32,7 @@ class Settings:
     delivery_concurrency: int = 4
     mcp_bearer_refresh_seconds: int = 2
     chat_cache_size: int = 512
+    source_instance: str = "default"
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -121,4 +122,5 @@ class Settings:
                 0,
                 _env_int("BEEPER_EVENTS_CHAT_CACHE_SIZE", 512),
             ),
+            source_instance=os.getenv("BEEPER_EVENTS_SOURCE_INSTANCE", "default"),
         )

@@ -43,6 +43,8 @@ class SourceEvent:
     sender_id: str | None
     sender_name: str | None
     discovered_via: str
+    source_system: str = "beeper"
+    source_instance: str = "default"
 
     def payload(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
