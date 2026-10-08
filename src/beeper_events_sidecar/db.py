@@ -3,11 +3,12 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import secrets
 import sqlite3
 from collections.abc import Callable, Iterator
 from contextlib import closing, contextmanager
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, ClassVar, TypeVar
 
 from .identity import SourceIdentity
 from .models import (
@@ -93,6 +94,21 @@ CREATE TABLE IF NOT EXISTS schema_meta (
     name TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS incidents (
+    incident_id TEXT PRIMARY KEY,
+    code TEXT NOT NULL,
+    severity TEXT NOT NULL,
+    message TEXT NOT NULL,
+    count INTEGER NOT NULL,
+    first_seen_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    resolved_at TEXT
+);
+CREATE INDEX IF NOT EXISTS incidents_open_idx
+ON incidents(resolved_at, last_seen_at);
+CREATE UNIQUE INDEX IF NOT EXISTS incidents_one_open_code_idx
+ON incidents(code) WHERE resolved_at IS NULL;
 """
 
 
@@ -135,6 +151,8 @@ class Database:
             if legacy:
                 self._backup_legacy(conn)
                 self._migrate_legacy(conn, source_instance)
+                # CREATE TABLE IF NOT EXISTS is not used inside the migration
+                # transaction: explicitly add incident tables before committing.
             else:
                 if version == 1:
                     raise RuntimeError(
@@ -290,6 +308,25 @@ class Database:
         conn.execute(
             "INSERT INTO schema_meta(name,value) VALUES('source_instance',?)",
             (source_instance,),
+        )
+        conn.execute(
+            """CREATE TABLE incidents(
+                incident_id TEXT PRIMARY KEY,
+                code TEXT NOT NULL,
+                severity TEXT NOT NULL,
+                message TEXT NOT NULL,
+                count INTEGER NOT NULL,
+                first_seen_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                resolved_at TEXT
+            )"""
+        )
+        conn.execute(
+            "CREATE INDEX incidents_open_idx ON incidents(resolved_at,last_seen_at)"
+        )
+        conn.execute(
+            "CREATE UNIQUE INDEX incidents_one_open_code_idx "
+            "ON incidents(code) WHERE resolved_at IS NULL"
         )
         conn.execute("PRAGMA user_version=2")
         if conn.execute("PRAGMA foreign_key_check").fetchone():
@@ -897,6 +934,93 @@ class Database:
             )
         return cursor.rowcount == 1
 
+    # Public incident codes map to hardcoded safe descriptions. Never persist
+    # exception messages, source identifiers, message contents or credentials.
+    _INCIDENT_MESSAGES: ClassVar[dict[str, str]] = {
+        "INGEST_INTEGRITY_ERROR": (
+            "A source occurrence failed identity or database integrity validation."
+        ),
+        "DELIVERY_DEAD_LETTER": (
+            "A webhook delivery was permanently unsuccessful."
+        ),
+        "WORKER_FAILURE": (
+            "A background worker exited unexpectedly; service restart is required."
+        ),
+    }
+
+    def record_incident(self, code: str, now: str) -> str:
+        if code not in self._INCIDENT_MESSAGES:
+            raise ValueError("Unsupported incident code")
+        candidate = "inc_" + secrets.token_hex(16)
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO incidents(
+                    incident_id,code,severity,message,count,
+                    first_seen_at,last_seen_at,resolved_at
+                ) VALUES (?,?, 'error',?,1,?,?,NULL)
+                ON CONFLICT(code) WHERE resolved_at IS NULL DO UPDATE SET
+                    count = incidents.count + 1,
+                    last_seen_at=excluded.last_seen_at
+                """,
+                (candidate, code, self._INCIDENT_MESSAGES[code], now, now),
+            )
+            row = conn.execute(
+                "SELECT incident_id FROM incidents "
+                "WHERE code=? AND resolved_at IS NULL",
+                (code,),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("Incident disappeared after insert")
+            return str(row["incident_id"])
+
+    def resolve_incident(self, code: str, now: str) -> bool:
+        if code not in self._INCIDENT_MESSAGES:
+            raise ValueError("Unsupported incident code")
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "UPDATE incidents SET resolved_at=? "
+                "WHERE code=? AND resolved_at IS NULL",
+                (now, code),
+            )
+            return cursor.rowcount > 0
+
+    def incident_diagnostics(self) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT incident_id,code,severity FROM incidents "
+                "WHERE resolved_at IS NULL "
+                "ORDER BY last_seen_at DESC,incident_id DESC LIMIT 1"
+            ).fetchone()
+            if row is None:
+                return None
+            count = conn.execute(
+                "SELECT count(*) FROM incidents WHERE resolved_at IS NULL"
+            ).fetchone()[0]
+        return {
+            "incident_id": row["incident_id"],
+            "code": row["code"],
+            "severity": row["severity"],
+            "unresolved_incidents": count,
+        }
+
+    def incident_status(self, limit: int = 5) -> dict[str, Any]:
+        with self._connect() as conn:
+            count = conn.execute(
+                "SELECT count(*) FROM incidents WHERE resolved_at IS NULL"
+            ).fetchone()[0]
+            rows = conn.execute(
+                """SELECT incident_id,code,severity,message,count,
+                          first_seen_at,last_seen_at
+                   FROM incidents WHERE resolved_at IS NULL
+                   ORDER BY last_seen_at DESC, incident_id DESC LIMIT ?""",
+                (max(0, min(limit, 20)),),
+            ).fetchall()
+        return {
+            "unresolved_incidents": int(count),
+            "recent_incidents": [dict(row) for row in rows],
+        }
+
     def stats(self, now: str) -> dict[str, Any]:
         with self._connect() as conn:
             active_subscriptions = conn.execute(
@@ -934,4 +1058,5 @@ class Database:
             "dead_letter_deliveries": int(dead),
             "oldest_pending_at": oldest,
             "source_events_seen": int(source_events),
+            **self.incident_status(),
         }

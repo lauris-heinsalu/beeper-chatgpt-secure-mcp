@@ -353,6 +353,20 @@ class McpApi:
                             "local_chat_id": {"type": "string"},
                             "network": {"type": "string"},
                             "message_id": {"type": "string"},
+                            "diagnostics": {
+                                "type": "object",
+                                "properties": {
+                                    "incident_id": {"type": "string"},
+                                    "code": {"type": "string"},
+                                    "severity": {"type": "string"},
+                                    "unresolved_incidents": {"type": "integer"},
+                                },
+                                "required": [
+                                    "incident_id", "code", "severity",
+                                    "unresolved_incidents",
+                                ],
+                                "additionalProperties": False,
+                            },
                             "sender_id": {"type": "string"},
                             "sender_name": {"type": "string"},
                             "timestamp": {

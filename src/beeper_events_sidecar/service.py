@@ -84,6 +84,33 @@ class EventService:
             ),
         ]
 
+    async def wait_for_worker_failure(self) -> None:
+        """Fail the owning process if any background worker unexpectedly exits.
+
+        Called by main alongside the shutdown signal. Never expose the
+        original exception text in the persisted incident.
+        """
+        if not self._tasks:
+            raise RuntimeError("No background workers were started")
+        finished, _ = await asyncio.wait(
+            self._tasks, return_when=asyncio.FIRST_COMPLETED
+        )
+        if self._stop.is_set():
+            return
+        name = min(task.get_name() for task in finished)
+        # Retrieve exceptions to avoid 'Task exception was never retrieved'.
+        for task in finished:
+            if not task.cancelled():
+                task.exception()
+        try:
+            await self.db.run_async(
+                self.db.record_incident, "WORKER_FAILURE",
+                isoformat_z(utc_now()),
+            )
+        except Exception:  # noqa: BLE001 - worker supervisor must still exit
+            logger.error("Failed to persist sanitized worker failure incident")
+        raise RuntimeError(f"Background worker exited unexpectedly: {name}")
+
     async def stop(self) -> None:
         self._stop.set()
         self._reconcile_requested.set()
@@ -202,12 +229,20 @@ class EventService:
             )
             if normalized is None:
                 continue
-            inserted = await self.db.run_async(
-                self.db.record_event_and_enqueue,
-                normalized,
-                now=isoformat_z(utc_now()),
-                deliverable=True,
-            )
+            try:
+                inserted = await self.db.run_async(
+                    self.db.record_event_and_enqueue,
+                    normalized,
+                    now=isoformat_z(utc_now()),
+                    deliverable=True,
+                )
+            except (sqlite3.IntegrityError, ValueError):
+                await self.db.run_async(
+                    self.db.record_incident, "INGEST_INTEGRITY_ERROR",
+                    isoformat_z(utc_now()),
+                )
+                self.request_reconcile()
+                raise RuntimeError("Source ingestion failed integrity validation") from None
             if inserted:
                 logger.info(
                     "Recorded incoming Beeper message event %s",
@@ -339,6 +374,12 @@ class EventService:
                 await self.reconcile_once()
             except asyncio.CancelledError:
                 raise
+            except (sqlite3.IntegrityError, ValueError):
+                await self.db.run_async(
+                    self.db.record_incident, "INGEST_INTEGRITY_ERROR",
+                    isoformat_z(utc_now()),
+                )
+                logger.error("Beeper reconciliation failed integrity validation")
             except Exception:
                 logger.exception("Beeper reconciliation failed")
 
@@ -518,11 +559,15 @@ class EventService:
             return
         delivery = current_delivery
 
+        data = delivery.source_event.payload()
+        diagnostics = await self.db.run_async(self.db.incident_diagnostics)
+        if diagnostics is not None:
+            data["diagnostics"] = diagnostics
         event = {
             "eventId": delivery.event_id,
             "name": delivery.source_event.name,
             "timestamp": delivery.source_event.occurred_at,
-            "data": delivery.source_event.payload(),
+            "data": data,
             "cursor": None,
         }
 
@@ -559,7 +604,7 @@ class EventService:
                 "private_address",
                 "payload_too_large",
             }:
-                await self.db.run_async(
+                marked_dead = await self.db.run_async(
                     self.db.mark_delivery_dead,
                     delivery.event_id,
                     subscription_id=delivery.subscription.id,
@@ -570,6 +615,11 @@ class EventService:
                     status_code=None,
                     error=error,
                 )
+                if marked_dead:
+                    await self.db.run_async(
+                        self.db.record_incident, "DELIVERY_DEAD_LETTER",
+                        isoformat_z(utc_now()),
+                    )
                 return
         except Exception as exc:  # noqa: BLE001 - persist unexpected delivery failures
             error = f"{type(exc).__name__}: {exc}"
@@ -588,7 +638,7 @@ class EventService:
             or attempts_after_this
             >= self.settings.delivery_max_attempts
         ):
-            await self.db.run_async(
+            marked_dead = await self.db.run_async(
                 self.db.mark_delivery_dead,
                 delivery.event_id,
                 subscription_id=delivery.subscription.id,
@@ -597,6 +647,11 @@ class EventService:
                 status_code=status_code,
                 error=error,
             )
+            if marked_dead:
+                await self.db.run_async(
+                    self.db.record_incident, "DELIVERY_DEAD_LETTER",
+                    isoformat_z(utc_now()),
+                )
             logger.error(
                 "Webhook delivery moved to dead letter: %s",
                 delivery.event_id,

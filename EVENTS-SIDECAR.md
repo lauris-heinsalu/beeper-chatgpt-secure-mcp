@@ -214,6 +214,40 @@ After deployment, confirm `PRAGMA user_version=2`,
 `PRAGMA foreign_key_check` returns no rows, and that both native MCP and Events
 paths still work. The staged implementation has not yet been deployed.
 
+## Persisted incidents and conditional event diagnostics (staged for v1.0.1)
+
+Serious ingestion integrity violations, permanent webhook delivery failures,
+and unexpectedly terminated background workers create sanitized records in the
+existing SQLite database. The `events_status` MCP tool returns
+`unresolved_incidents` and up to five `recent_incidents`, including stable
+incident IDs, fixed error codes, human-readable **static** messages, counts and
+timestamps. Raw exception text, credentials, message text, and source identifiers
+are not stored in incident records.
+
+Only when at least one incident is unresolved does a `message.created`
+delivery carry an **optional** `data.diagnostics` object with incident ID,
+code, severity and unresolved count. Otherwise the payload remains unchanged.
+`events/list` advertises the optional field in its strict `payloadSchema`.
+
+An existing event-triggered automation can inspect this optional field and
+call `events_status` only when it appears. Repeated events for the same
+incident use the same incident ID; after manual resolution, a new occurrence
+gets a new ID. No separate monitor, notification service, or additional MCP
+call per healthy message is required.
+
+Limitations: incidents reach an agent only on a subsequently delivered
+message, not instantly. If there is no new incoming message, if the webhook
+path itself is failing, or if the entire sidecar is down, this is **not**
+independent monitoring. Serious worker failure is persisted when possible and
+propagated to the main process for systemd to restart; inability to write an
+incident does not prevent fail-fast shutdown.
+
+Incident resolution is currently an internal database operation, not an
+exposed MCP write tool. An operator should resolve only after diagnosing the
+underlying problem. Operator logs are a separate channel and may contain
+upstream error details; review them before sharing. MCP incident descriptions
+use only the allowlisted static messages above.
+
 ## Local development
 
 Python 3.12+:
